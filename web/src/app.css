@@ -68,6 +68,15 @@
   }
 }
 
+/* Notch and home indicator insets (non-zero when installed to the home screen, viewport-fit=cover). */
+:root {
+  --inset-top: env(safe-area-inset-top, 0px);
+  --inset-right: env(safe-area-inset-right, 0px);
+  --inset-bottom: env(safe-area-inset-bottom, 0px);
+  --inset-left: env(safe-area-inset-left, 0px);
+  --topbar-height: calc(46px + var(--inset-top));
+}
+
 *, *::before, *::after { box-sizing: border-box; }
 [hidden] { display: none !important; }
 
@@ -192,7 +201,10 @@ fieldset { border: none; padding: 0; margin: 0; min-width: 0; }
 /* ---------- Boot & login ---------- */
 
 .boot { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; }
-.login { min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 16px; }
+.login {
+  min-height: 100vh; min-height: 100dvh; display: flex; align-items: center; justify-content: center;
+  padding: calc(16px + var(--inset-top)) calc(16px + var(--inset-right)) calc(16px + var(--inset-bottom)) calc(16px + var(--inset-left));
+}
 .login-card {
   width: 320px; max-width: 100%; background: var(--panel); border: 1px solid var(--border);
   border-radius: 10px; padding: 28px 24px; box-shadow: var(--shadow); display: flex; flex-direction: column; gap: 14px;
@@ -208,9 +220,10 @@ fieldset { border: none; padding: 0; margin: 0; min-width: 0; }
 
 /* ---------- App shell ---------- */
 
-#app { height: 100vh; height: 100dvh; display: grid; grid-template-rows: 46px minmax(0, 1fr) auto; }
+#app { height: 100vh; height: 100dvh; display: grid; grid-template-rows: var(--topbar-height) minmax(0, 1fr) auto; }
 .topbar {
-  display: flex; align-items: center; gap: 10px; padding: 0 12px;
+  display: flex; align-items: center; gap: 10px;
+  padding: var(--inset-top) calc(12px + var(--inset-right)) 0 calc(12px + var(--inset-left));
   background: var(--panel); border-bottom: 1px solid var(--border); min-width: 0;
 }
 .brand { display: flex; align-items: center; gap: 8px; font-weight: 700; font-size: 15px; white-space: nowrap; }
@@ -236,7 +249,7 @@ fieldset { border: none; padding: 0; margin: 0; min-width: 0; }
 .task-indicator.active { color: var(--text); border-color: var(--accent); }
 .task-indicator:hover { background: var(--hover); }
 
-.main { display: grid; grid-template-columns: clamp(230px, 14vw, 320px) minmax(0, 1fr); min-height: 0; }
+.main { display: grid; grid-template-columns: clamp(230px, 14vw, 320px) minmax(0, 1fr); min-height: 0; padding: 0 var(--inset-right) 0 var(--inset-left); }
 
 /* tree */
 .tree-panel { background: var(--panel); border-right: 1px solid var(--border); overflow: auto; padding: 8px 0; }
@@ -334,7 +347,7 @@ fieldset { border: none; padding: 0; margin: 0; min-width: 0; }
 .target-checks .check input { margin-top: 2px; }
 
 /* tasks panel */
-.tasks-panel { background: var(--panel); border-top: 1px solid var(--border); min-width: 0; }
+.tasks-panel { background: var(--panel); border-top: 1px solid var(--border); min-width: 0; padding: 0 var(--inset-right) var(--inset-bottom) var(--inset-left); }
 .tasks-header { display: flex; align-items: center; gap: 10px; padding: 0 12px; height: 30px; border-bottom: 1px solid var(--border); }
 .tasks-panel.collapsed .tasks-header { border-bottom: none; }
 .tasks-toggle { display: inline-flex; align-items: center; gap: 6px; border: none; background: none; color: var(--text); font: inherit; font-weight: 600; cursor: pointer; padding: 4px 2px; }
@@ -357,9 +370,12 @@ fieldset { border: none; padding: 0; margin: 0; min-width: 0; }
 .modal.wide { width: 720px; }
 .section-title { font-size: 13px; margin: 20px 0 10px; padding-top: 14px; border-top: 1px solid var(--border); }
 .check-row { display: flex; gap: 24px; flex-wrap: wrap; margin-top: 16px; }
-.modal-backdrop { position: fixed; inset: 0; background: var(--backdrop); display: flex; align-items: center; justify-content: center; padding: 16px; z-index: 100; }
+.modal-backdrop {
+  position: fixed; inset: 0; background: var(--backdrop); display: flex; align-items: center; justify-content: center; z-index: 100;
+  padding: calc(16px + var(--inset-top)) calc(16px + var(--inset-right)) calc(16px + var(--inset-bottom)) calc(16px + var(--inset-left));
+}
 .modal {
-  width: 540px; max-width: 100%; max-height: calc(100vh - 32px); display: flex; flex-direction: column;
+  width: 540px; max-width: 100%; max-height: calc(100dvh - 32px - var(--inset-top) - var(--inset-bottom)); display: flex; flex-direction: column;
   background: var(--panel); border: 1px solid var(--border); border-radius: 10px; box-shadow: var(--shadow);
 }
 .modal > form { display: flex; flex-direction: column; min-height: 0; }
@@ -369,7 +385,7 @@ fieldset { border: none; padding: 0; margin: 0; min-width: 0; }
 .modal-footer { display: flex; justify-content: flex-end; gap: 8px; padding: 12px 16px; border-top: 1px solid var(--border); }
 
 /* toasts */
-.toasts { position: fixed; top: 54px; right: 16px; display: flex; flex-direction: column; gap: 8px; z-index: 200; max-width: min(420px, calc(100vw - 32px)); }
+.toasts { position: fixed; top: calc(var(--topbar-height) + 8px); right: 16px; display: flex; flex-direction: column; gap: 8px; z-index: 200; max-width: min(420px, calc(100vw - 32px)); }
 .toast {
   padding: 10px 14px; border-radius: var(--radius); background: var(--panel); color: var(--text);
   border: 1px solid var(--border); border-left: 4px solid var(--accent); box-shadow: var(--shadow);
@@ -393,7 +409,7 @@ fieldset { border: none; padding: 0; margin: 0; min-width: 0; }
 @media (max-width: 760px) {
   .wide-only { display: none !important; }
   .narrow-only { display: revert; }
-  .topbar { gap: 6px; padding: 0 8px; }
+  .topbar { gap: 6px; padding-left: calc(8px + var(--inset-left)); padding-right: calc(8px + var(--inset-right)); }
   .nav-toggle { display: inline-flex; }
   .host-info { display: none; }
   .task-indicator, .mem-indicator { padding: 0 8px; }
@@ -401,14 +417,15 @@ fieldset { border: none; padding: 0; margin: 0; min-width: 0; }
 
   .main { grid-template-columns: minmax(0, 1fr); }
   .tree-panel {
-    position: fixed; top: 46px; bottom: 0; left: 0; z-index: 60; width: min(300px, 85vw);
+    position: fixed; top: var(--topbar-height); bottom: 0; left: 0; z-index: 60; width: min(300px + var(--inset-left), 85vw);
+    padding-left: var(--inset-left);
     display: flex; flex-direction: column; border-right: 1px solid var(--border); box-shadow: var(--shadow);
     transform: translateX(-105%); visibility: hidden; transition: transform .2s ease, visibility 0s .2s;
   }
   .tree-panel.open { transform: none; visibility: visible; transition: transform .2s ease; }
   .tree-panel > .tree { flex: 1; }
-  .tree-footer { padding: 12px; border-top: 1px solid var(--border); }
-  .nav-backdrop { display: block; position: fixed; inset: 46px 0 0; z-index: 50; background: var(--backdrop); }
+  .tree-footer { padding: 12px 12px calc(12px + var(--inset-bottom)); border-top: 1px solid var(--border); }
+  .nav-backdrop { display: block; position: fixed; inset: var(--topbar-height) 0 0; z-index: 50; background: var(--backdrop); }
 
   .content-header { padding: 10px 12px 0; }
   .tabbar { padding: 6px 12px 0; scrollbar-width: none; }
@@ -421,8 +438,10 @@ fieldset { border: none; padding: 0; margin: 0; min-width: 0; }
   .table th, .table td { padding-left: 8px; padding-right: 8px; }
   .task-msg { display: none; }
   .tasks-body { height: 40vh; }
-  .modal-backdrop { padding: 8px; }
-  .modal { max-height: calc(100dvh - 16px); }
+  .modal-backdrop {
+    padding: calc(8px + var(--inset-top)) calc(8px + var(--inset-right)) calc(8px + var(--inset-bottom)) calc(8px + var(--inset-left));
+  }
+  .modal { max-height: calc(100dvh - 16px - var(--inset-top) - var(--inset-bottom)); }
   .mem-head { flex-wrap: wrap; gap: 4px 16px; }
 }
 @media (max-width: 480px) {
