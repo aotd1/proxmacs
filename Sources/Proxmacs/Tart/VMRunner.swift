@@ -26,6 +26,7 @@ enum VMRunner {
     static func run(_ vm: String) throws -> Never {
         guard var meta = VMMeta.load(vm) else { throw ProxmacsError("No VM named \(vm)") }
         guard let tart = Tart.locate() else { throw ProxmacsError("tart not found") }
+        try waitForStorage()
         if meta.seedPending {
             // This boot picks up the rebuilt seed.
             meta.seedPending = false
@@ -50,6 +51,7 @@ enum VMRunner {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: tart.path)
         process.arguments = LaunchAgent.tartRunArguments(meta: meta, serialPath: slavePath)
+        process.environment = Tart.environment
         try process.run()
         print("proxmacs: started tart (pid \(process.processIdentifier)), console on \(slavePath)")
 
@@ -67,6 +69,17 @@ enum VMRunner {
         print("proxmacs: tart exited with status \(process.terminationStatus)")
         _ = slave  // keep the slave open for the VM's whole lifetime
         exit(process.terminationStatus)
+    }
+
+    /// At login an external drive may mount after the LaunchAgent starts: give it a few minutes.
+    private static func waitForStorage(timeout: TimeInterval = 180) throws {
+        guard !Storage.isAvailable(.vms) else { return }
+        print("proxmacs: waiting for \(Storage.url(.vms).path)…")
+        let deadline = Date().addingTimeInterval(timeout)
+        while !Storage.isAvailable(.vms) {
+            guard Date() < deadline else { throw Storage.unavailableError(.vms) }
+            Thread.sleep(forTimeInterval: 2)
+        }
     }
 }
 

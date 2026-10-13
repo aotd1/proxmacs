@@ -81,6 +81,27 @@ struct WebAPI: Sendable {
             }
             return API.json(json)
         }
+        router.get("/api/host/storage") { _, _ in
+            let busy = await state.storageBusy
+            return API.json([
+                "vms": Self.storageJSON(Storage.info(.vms)),
+                "backups": Self.storageJSON(Storage.info(.backups)),
+                "busy": busy?.rawValue as Any? ?? NSNull(),
+                "vmsFixed": Storage.tartHomeOverridden,
+                "volumes": Storage.externalVolumes().map(Self.volumeJSON),
+            ])
+        }
+        router.put("/api/host/storage") { request, _ in
+            await API.guarded {
+                let body = try await API.body(request)
+                guard let kind = (body["kind"] as? String).flatMap(StorageKind.init) else { throw APIError(message: "kind must be vms or backups") }
+                let path = (body["path"] as? String).flatMap { $0.trimmingCharacters(in: .whitespaces).isEmpty ? nil : $0 }
+                let plan = try await state.planStorageChange(kind, to: path)
+                let task = Self.newTaskID()
+                Task { @MainActor in try? await state.changeStorage(plan, taskID: task) }
+                return API.json(["task": task], status: .accepted)
+            }
+        }
         router.get("/api/host/sshkeys") { _, _ in
             API.json(CloudInitSeed.sshPublicKeys())
         }
@@ -254,6 +275,7 @@ struct WebAPI: Sendable {
         router.get("/api/vms/:name/backups") { _, context in
             await API.guarded {
                 let name = try Self.param(context, "name")
+                try Storage.require(.backups)
                 return API.json(BackupManager.list(name).map { backup -> [String: Any] in
                     ["id": backup.name, "date": backup.record.date.ISO8601Format(), "consistent": backup.record.consistent,
                      "source": backup.record.source as Any? ?? NSNull()]
@@ -389,6 +411,16 @@ struct WebAPI: Sendable {
     // MARK: Helpers
 
     static func newTaskID() -> String { UUID().uuidString.lowercased() }
+
+    static func storageJSON(_ info: StorageInfo) -> [String: Any] {
+        ["path": info.path, "default": info.isDefault, "available": info.available,
+         "volume": info.volume.map(volumeJSON) as Any? ?? NSNull()]
+    }
+
+    static func volumeJSON(_ volume: VolumeInfo) -> [String: Any] {
+        ["path": volume.path, "name": volume.name, "fileSystem": volume.fileSystem, "internal": volume.isInternal,
+         "ejectable": volume.ejectable, "freeBytes": volume.freeBytes, "totalBytes": volume.totalBytes]
+    }
 
     static func param(_ context: WebContext, _ name: String) throws -> String {
         guard let value = context.parameters.get(name), !value.isEmpty else { throw APIError(message: "missing \(name)") }

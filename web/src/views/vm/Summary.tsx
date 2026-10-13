@@ -29,13 +29,20 @@ export function VMSummary({ vm, navigate }: { vm: VM; navigate: Navigate }) {
         <ActionButton className="primary" disabled={!canStart} title={canStart ? null : running ? 'Already running' : `Cannot start a ${vm.state} VM`}
           onClick={() => vmStart(app.startTask, vm)}>Start</ActionButton>
         <ActionButton disabled={!running} title={running ? null : 'The VM is not running'} onClick={() => vmStop(app.startTask, vm)}>Shutdown</ActionButton>
-        <ActionButton disabled={vm.state === 'missing'} title={vm.state === 'missing' ? 'The VM is missing' : null}
+        <ActionButton disabled={vm.state === 'missing' || vm.state === 'offline'} title={vm.state === 'missing' || vm.state === 'offline' ? `The VM is ${vm.state}` : null}
           onClick={() => vmBackup(app.startTask, vm)}>Back up now</ActionButton>
         <div className="spacer" />
-        <ActionButton className="danger" onClick={() => vmDelete(app.startTask, confirm, vm)}>Delete</ActionButton>
+        <ActionButton className="danger" disabled={vm.state === 'offline'} title={vm.state === 'offline' ? 'VM storage is not connected' : null}
+          onClick={() => vmDelete(app.startTask, confirm, vm)}>Delete</ActionButton>
       </div>
       {vm.seedPending && (
         <div className="note warn">Cloud-init settings changed while the VM was running. Shut it down and start it again to apply them.</div>
+      )}
+      {vm.state === 'offline' && (
+        <div className="note warn">
+          VM storage ({app.storage?.vms.path ?? 'external drive'}) is not connected. Connect the drive, or{' '}
+          <button type="button" className="link" onClick={() => navigate({ type: 'host', tab: 'storage' })}>change the storage location</button>.
+        </div>
       )}
       {vm.state === 'missing' && (
         <div className="note">This VM is registered with Proxmacs but its Tart VM was not found. Restore it from the Backups tab, or pull a snapshot from the Offsite tab.</div>

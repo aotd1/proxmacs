@@ -12,6 +12,7 @@ struct VMRowView: View {
         case "running": .green
         case "stopped": .secondary
         case "missing": .red
+        case "offline": .gray
         default: .orange
         }
     }
@@ -48,7 +49,7 @@ struct VMRowView: View {
             } else {
                 Button { Task { await state.start(item.name) } } label: { Image(systemName: "play.fill") }
                     .help("Start")
-                    .disabled(item.state == "missing")
+                    .disabled(item.state == "missing" || item.state == "offline")
             }
 
             Menu {
@@ -77,13 +78,13 @@ struct VMRowView: View {
             .fixedSize()
         }
         .buttonStyle(.borderless)
-        .disabled(activity != nil)
+        .disabled(activity != nil || item.state == "offline")
     }
 
     private func confirmDelete() {
         let alert = NSAlert()
         alert.messageText = "Delete \(item.name)?"
-        alert.informativeText = "The VM and its disk will be removed. Backups are kept in the data folder."
+        alert.informativeText = "The VM and its disk will be removed. Its backups are kept."
         alert.alertStyle = .warning
         alert.addButton(withTitle: "Delete")
         alert.addButton(withTitle: "Cancel")

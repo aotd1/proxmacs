@@ -20,6 +20,15 @@ struct MenuContent: View {
                     .textSelection(.enabled)
             }
 
+            ForEach(StorageKind.allCases, id: \.self) { kind in
+                if !(kind == .vms ? state.vmStorageOnline : state.backupStorageOnline) {
+                    Label("\(kind.label) unavailable: connect the drive with \(Storage.url(kind).path)", systemImage: "externaldrive.badge.exclamationmark")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+
             if let memory = state.memory {
                 MemoryGauge(memory: memory, vmBytes: state.vms.filter(\.isRunning).reduce(0) { $0 + UInt64($1.memoryMB ?? 0) * 1_048_576 })
             }

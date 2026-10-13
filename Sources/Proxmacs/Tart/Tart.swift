@@ -28,13 +28,23 @@ struct Tart {
         return candidates.first { FileManager.default.isExecutableFile(atPath: $0) }.map(Tart.init)
     }
 
+    /// Points Tart at the configured VM storage.
+    static var environment: [String: String] {
+        var env = ProcessInfo.processInfo.environment
+        env["TART_HOME"] = Paths.tartHome.path
+        return env
+    }
+
+    /// Refuses to run while VM storage is unavailable: Tart would otherwise create an empty home
+    /// in its place and report every VM as gone.
     @discardableResult
     func run(_ args: [String], timeout: TimeInterval? = nil) async throws -> String {
-        try await Shell.check(path, args, timeout: timeout)
+        try Storage.require(.vms)
+        return try await Shell.check(path, args, timeout: timeout, environment: Self.environment)
     }
 
     func version() async -> String? {
-        try? await run(["--version"]).trimmingCharacters(in: .whitespacesAndNewlines)
+        try? await Shell.check(path, ["--version"]).trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     func list() async throws -> [TartVM] {
@@ -71,6 +81,7 @@ struct Tart {
 
     /// Runs a command in the guest via tart-guest-agent.
     func exec(_ name: String, _ command: [String], timeout: TimeInterval = 30) async throws -> CommandResult {
-        try await Shell.run(path, ["exec", name] + command, timeout: timeout)
+        try Storage.require(.vms)
+        return try await Shell.run(path, ["exec", name] + command, timeout: timeout, environment: Self.environment)
     }
 }

@@ -20,12 +20,14 @@ struct CommandError: LocalizedError {
 
 enum Shell {
     /// Runs a process to completion off the main thread. `timeout` terminates it (status then reflects SIGTERM).
-    static func run(_ executable: String, _ arguments: [String], timeout: TimeInterval? = nil) async throws -> CommandResult {
+    static func run(_ executable: String, _ arguments: [String], timeout: TimeInterval? = nil,
+                    environment: [String: String]? = nil) async throws -> CommandResult {
         try await withCheckedThrowingContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async {
                 let process = Process()
                 process.executableURL = URL(fileURLWithPath: executable)
                 process.arguments = arguments
+                if let environment { process.environment = environment }
                 process.standardInput = FileHandle.nullDevice
                 let out = Pipe()
                 let err = Pipe()
@@ -68,8 +70,9 @@ enum Shell {
 
     /// Like `run`, but throws `CommandError` on a non-zero exit status.
     @discardableResult
-    static func check(_ executable: String, _ arguments: [String], timeout: TimeInterval? = nil) async throws -> String {
-        let result = try await run(executable, arguments, timeout: timeout)
+    static func check(_ executable: String, _ arguments: [String], timeout: TimeInterval? = nil,
+                      environment: [String: String]? = nil) async throws -> String {
+        let result = try await run(executable, arguments, timeout: timeout, environment: environment)
         guard result.succeeded else {
             throw CommandError(command: ([executable] + arguments).joined(separator: " "), result: result)
         }

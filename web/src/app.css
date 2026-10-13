@@ -436,3 +436,16 @@ input.narrow { width: 90px; }
 @media (max-width: 760px) {
   .mem-indicator > span:first-child { display: none; }
 }
+
+/* storage */
+.storage-form { margin-top: 14px; }
+.storage-form .section-title { margin-top: 0; }
+.storage-form .field { margin-top: 12px; }
+.storage-form .actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 12px; }
+.radio-list { display: flex; flex-direction: column; gap: 8px; }
+.radio-row { display: flex; align-items: flex-start; gap: 8px; cursor: pointer; }
+.radio-row input { margin-top: 3px; }
+.radio-row.disabled { cursor: default; opacity: 0.6; }
+.radio-row .hint { color: var(--muted); font-size: 12px; }
+.storage-indicator { height: 28px; }
+.dot.offline { background: var(--muted); }

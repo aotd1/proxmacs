@@ -2,7 +2,7 @@ import { createContext, useCallback, useContext, useMemo, useRef, useState, type
 import { api, AuthError } from './api';
 import { useToast } from './components/Toasts';
 import { useLocalStorage, usePoller } from './hooks';
-import type { Host, HostStats, NetInterface, Target, Task, VM } from './types';
+import type { Host, HostStats, NetInterface, StorageStatus, Target, Task, VM } from './types';
 
 /** Samples kept for the host memory chart (3 s apart → 6 minutes). */
 const HISTORY = 120;
@@ -24,6 +24,7 @@ interface AppData {
   tasks: Task[];
   targets: Target[];
   interfaces: NetInterface[];
+  storage: StorageStatus | null;
   /** VM name → number of its tasks that finished since load; views reload their data when it changes. */
   taskEpoch: Record<string, number>;
   tasksOpen: boolean;
@@ -32,6 +33,7 @@ interface AppData {
   target(id: string): Target | null;
   updateVM(vm: VM): void;
   reloadTargets(): Promise<void>;
+  reloadStorage(): Promise<void>;
   reloadInterfaces(): Promise<NetInterface[]>;
   /** Starts a backend task (202 {task}); the user is notified when it finishes. */
   startTask(method: string, path: string, body: unknown, label: string): Promise<void>;
@@ -57,6 +59,7 @@ export function AppDataProvider({ children }: { children: ReactNode }) {
   const [tasks, setTasks] = useState<Task[]>([]);
   const [targets, setTargets] = useState<Target[]>([]);
   const [interfaces, setInterfaces] = useState<NetInterface[]>([]);
+  const [storage, setStorage] = useState<StorageStatus | null>(null);
   const [taskEpoch, setTaskEpoch] = useState<Record<string, number>>({});
   const [tasksOpen, setTasksOpen] = useLocalStorage('proxmacs.tasksOpen', true);
 
@@ -64,6 +67,7 @@ export function AppDataProvider({ children }: { children: ReactNode }) {
   const seeded = useRef(false);
   const myTasks = useRef(new Map<string, string>());
   const pollRef = useRef<() => void>(() => {});
+  const storageRef = useRef<() => void>(() => {});
 
   const handleTasks = useCallback((list: Task[]) => {
     const finished: Task[] = [];
@@ -86,6 +90,7 @@ export function AppDataProvider({ children }: { children: ReactNode }) {
         for (const t of finished) if (t.vm) next[t.vm] = (next[t.vm] ?? 0) + 1;
         return next;
       });
+      if (finished.some((t) => !t.vm)) storageRef.current();
       // The VM's state likely changed with the task: refresh again shortly.
       window.setTimeout(() => pollRef.current(), 300);
     }
@@ -123,12 +128,23 @@ export function AppDataProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
+  const reloadStorage = useCallback(async () => {
+    try {
+      setStorage(await api<StorageStatus>('GET', '/api/host/storage'));
+    } catch (e) {
+      if (!(e instanceof AuthError)) console.warn('storage:', e);
+    }
+  }, []);
+
+  storageRef.current = () => void reloadStorage();
+
   const refreshSlow = useCallback(async () => {
     await Promise.all([
       api<Host>('GET', '/api/host').then(setHost, () => {}),
       reloadTargets(),
+      reloadStorage(),
     ]);
-  }, [reloadTargets]);
+  }, [reloadTargets, reloadStorage]);
 
   const reloadInterfaces = useCallback(async () => {
     try {
@@ -164,12 +180,12 @@ export function AppDataProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const value = useMemo<AppData>(() => ({
-    loaded, online, host, stats, history, vms, tasks, targets, interfaces, taskEpoch, tasksOpen, setTasksOpen,
+    loaded, online, host, stats, history, vms, tasks, targets, interfaces, storage, taskEpoch, tasksOpen, setTasksOpen,
     vm: (name) => vms.find((v) => v.name === name) ?? null,
     target: (id) => targets.find((t) => String(t.id) === String(id)) ?? null,
-    updateVM, reloadTargets, reloadInterfaces, startTask, pollNow,
-  }), [loaded, online, host, stats, history, vms, tasks, targets, interfaces, taskEpoch, tasksOpen, setTasksOpen,
-    updateVM, reloadTargets, reloadInterfaces, startTask, pollNow]);
+    updateVM, reloadTargets, reloadStorage, reloadInterfaces, startTask, pollNow,
+  }), [loaded, online, host, stats, history, vms, tasks, targets, interfaces, storage, taskEpoch, tasksOpen, setTasksOpen,
+    updateVM, reloadTargets, reloadStorage, reloadInterfaces, startTask, pollNow]);
 
   return <AppDataContext.Provider value={value}>{children}</AppDataContext.Provider>;
 }

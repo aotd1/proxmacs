@@ -33,8 +33,8 @@ export function Empty({ children, error }: { children: ReactNode; error?: boolea
 
 export const Loading = ({ what = 'Loading…' }: { what?: string }) => <Empty><Spinner /> {what}</Empty>;
 
-const stateClass = (s: VMState) => (s === 'running' || s === 'stopped' || s === 'missing' ? s : 'other');
-const badgeClass: Record<string, string> = { running: 'ok', stopped: '', missing: 'err' };
+const stateClass = (s: VMState) => (s === 'running' || s === 'stopped' || s === 'missing' || s === 'offline' ? s : 'other');
+const badgeClass: Record<string, string> = { running: 'ok', stopped: '', missing: 'err', offline: '' };
 
 export const StateDot = ({ state }: { state: VMState }) => <span className={`dot ${stateClass(state)}`} title={state} />;
 export const StateBadge = ({ state }: { state: VMState }) => <span className={`badge ${badgeClass[state] ?? 'warn'}`}>{state || 'unknown'}</span>;

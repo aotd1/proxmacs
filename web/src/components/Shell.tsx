@@ -6,6 +6,7 @@ import type { Task } from '../types';
 import { CreateVMDialog } from '../views/CreateVM';
 import { HostSummary } from '../views/host/HostSummary';
 import { ImagesView } from '../views/host/Images';
+import { StorageView } from '../views/host/Storage';
 import { TargetsView } from '../views/host/Targets';
 import { BackupsView } from '../views/vm/Backups';
 import { CloudInitView } from '../views/vm/CloudInit';
@@ -17,7 +18,7 @@ import { Badge, Loading, Spinner, StateBadge, StateDot } from './ui';
 // xterm is large; load it with the console tab.
 const ConsoleView = lazy(() => import('../views/vm/Console').then((m) => ({ default: m.ConsoleView })));
 
-const HOST_TABS = [['summary', 'Summary'], ['targets', 'Backup Targets'], ['images', 'Images']] as const;
+const HOST_TABS = [['summary', 'Summary'], ['storage', 'Storage'], ['targets', 'Backup Targets'], ['images', 'Images']] as const;
 const VM_TABS = [
   ['summary', 'Summary'], ['hardware', 'Hardware'], ['cloudinit', 'Cloud-Init'],
   ['console', 'Console'], ['backups', 'Backups'], ['offsite', 'Offsite'],
@@ -56,7 +57,8 @@ export function Shell({ onLogout }: { onLogout: () => void }) {
 }
 
 function Topbar({ onCreate, onLogout, navigate }: { onCreate: () => void; onLogout: () => void; navigate: Navigate }) {
-  const { host, stats, tasks, online, setTasksOpen } = useApp();
+  const { host, stats, tasks, online, storage, setTasksOpen } = useApp();
+  const offline = storage ? (['vms', 'backups'] as const).filter((k) => !storage[k].available) : [];
   const running = tasks.filter((t) => t.status === 'running').length;
   const memory = stats?.memory;
   const usedPct = memory ? Math.round((memory.used / memory.total) * 100) : null;
@@ -78,6 +80,12 @@ function Topbar({ onCreate, onLogout, navigate }: { onCreate: () => void; onLogo
           <span>Memory</span>
           <span className="mini-meter"><span style={{ width: `${usedPct}%` }} /></span>
           <span className="mono">{usedPct}%</span>
+        </button>
+      )}
+      {offline.length > 0 && (
+        <button type="button" className="btn storage-indicator" title="A storage drive is disconnected"
+          onClick={() => navigate({ type: 'host', tab: 'storage' })}>
+          <Badge kind="err">{offline.map((k) => (k === 'vms' ? 'VM storage' : 'Backup storage')).join(' & ')} offline</Badge>
         </button>
       )}
       {!online && <Badge kind="err">Connection lost</Badge>}
@@ -132,7 +140,8 @@ function Content({ route, navigate }: { route: Route; navigate: Navigate }) {
 
   let body: ReactNode = null;
   if (route.type === 'host') {
-    body = route.tab === 'targets' ? <TargetsView /> : route.tab === 'images' ? <ImagesView /> : <HostSummary navigate={navigate} />;
+    body = route.tab === 'targets' ? <TargetsView /> : route.tab === 'images' ? <ImagesView />
+      : route.tab === 'storage' ? <StorageView /> : <HostSummary navigate={navigate} />;
   } else if (vm) {
     const props = { vm, navigate };
     body = {

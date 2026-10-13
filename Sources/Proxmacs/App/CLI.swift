@@ -38,6 +38,10 @@ enum CLI {
       pull <target> <name> [id]        download a snapshot into local backups (default newest);
                                        recreates the VM if it doesn't exist
 
+      storage                          show where VM disks and local backups are stored
+      storage vms|backups <folder>     move them to a folder, e.g. on an external APFS drive
+      storage vms|backups --default    move them back to the internal disk
+
       console <name>                   attach to the serial console (Ctrl-] detaches)
       web-passwd [--stdin]             set the web UI admin password
       serve                            run the web UI headless (no menubar)
@@ -184,6 +188,7 @@ enum CLI {
             }
 
         case "backups":
+            try Storage.require(.backups)
             for (index, backup) in BackupManager.list(try name()).enumerated() {
                 print("\(index)\t\(backup.record.date.formatted(.iso8601))\t\(backup.record.consistent ? "consistent" : "crash-consistent")")
             }
@@ -191,6 +196,7 @@ enum CLI {
         case "restore":
             let vm = try name()
             let index = args.count > 2 ? Int(args[2]) ?? 0 : 0
+            try Storage.require(.backups)
             let backups = BackupManager.list(vm)
             guard backups.indices.contains(index) else { throw ProxmacsError("no backup #\(index) for \(vm)") }
             await state.restore(vm, backups[index]); try check()
@@ -256,6 +262,26 @@ enum CLI {
             guard let id else { throw ProxmacsError("no snapshots of \(vm) on \(target.name)") }
             printProgress(state)
             await state.pull(vm, snapshotID: id, targetID: target.id); try check()
+
+        case "storage":
+            if args.count == 1 {
+                for kind in StorageKind.allCases {
+                    let info = Storage.info(kind)
+                    var line = "\(kind.rawValue)\t\(info.path)"
+                    if info.isDefault { line += "  (default)" }
+                    if !info.available {
+                        line += "  UNAVAILABLE (drive disconnected?)"
+                    } else if let volume = info.volume {
+                        line += "  [\(volume.name), \(volume.fileSystem), \(ByteCountFormatter.string(fromByteCount: volume.freeBytes, countStyle: .file)) free]"
+                    }
+                    print(line)
+                }
+                return
+            }
+            guard args.count > 2, let kind = StorageKind(rawValue: args[1]) else { throw ProxmacsError(usage) }
+            let plan = try await state.planStorageChange(kind, to: args[2] == "--default" ? nil : args[2])
+            printProgress(state)
+            try await state.changeStorage(plan)
 
         case "web-passwd":
             if args.contains("--stdin") {

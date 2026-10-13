@@ -1,6 +1,7 @@
 // Shapes returned by the Proxmacs JSON API (Sources/Proxmacs/Web/WebAPI.swift).
 
-export type VMState = 'running' | 'stopped' | 'suspended' | 'missing' | (string & {});
+/** 'offline': VM storage is on a drive that is not connected. */
+export type VMState = 'running' | 'stopped' | 'suspended' | 'missing' | 'offline' | (string & {});
 
 export interface NetworkConfig {
   mode: 'nat' | 'bridged';
@@ -70,6 +71,37 @@ export interface Host {
   osVersion: string;
   diskFreeBytes: number;
   diskTotalBytes: number;
+}
+
+export interface Volume {
+  path: string;
+  name: string;
+  fileSystem: string;
+  internal: boolean;
+  ejectable: boolean;
+  freeBytes: number;
+  totalBytes: number;
+}
+
+export interface StorageLocation {
+  path: string;
+  default: boolean;
+  /** False while a custom location's drive is disconnected. */
+  available: boolean;
+  volume: Volume | null;
+}
+
+export type StorageKind = 'vms' | 'backups';
+
+export interface StorageStatus {
+  vms: StorageLocation;
+  backups: StorageLocation;
+  /** Which storage is being moved right now. */
+  busy: StorageKind | null;
+  /** VM storage is fixed by TART_HOME in the server's environment. */
+  vmsFixed: boolean;
+  /** Mounted external volumes. */
+  volumes: Volume[];
 }
 
 export interface HostMemory {

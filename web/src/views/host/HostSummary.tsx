@@ -1,3 +1,4 @@
+import type { ReactNode } from 'react';
 import { Badge, KV, Loading, Meter, Panel, StateDot } from '../../components/ui';
 import type { Navigate } from '../../components/Shell';
 import { fmtBytes, fmtMemMB } from '../../format';
@@ -5,7 +6,7 @@ import { useApp, type StatsSample } from '../../store';
 import type { HostMemory } from '../../types';
 
 export function HostSummary({ navigate }: { navigate: Navigate }) {
-  const { host, stats, history, vms } = useApp();
+  const { host, stats, history, vms, storage } = useApp();
   if (!host) return <Loading what="Loading host information…" />;
 
   const diskUsed = host.diskTotalBytes ? 1 - host.diskFreeBytes / host.diskTotalBytes : 0;
@@ -25,10 +26,19 @@ export function HostSummary({ navigate }: { navigate: Navigate }) {
             ['Tart', host.tartVersion ?? <Badge kind="err">not found</Badge>],
             ['CPUs', String(host.cpus ?? '—')],
             load.length === 3 && ['Load average', <span className="mono">{load.map((l) => l.toFixed(2)).join('  ')}</span>],
-            ['Disk', <div>
+            ...(storage ? (['vms', 'backups'] as const).map((kind) => {
+              const loc = storage[kind];
+              const v = loc.volume;
+              return [kind === 'vms' ? 'VM storage' : 'Backups', !loc.available
+                ? <button type="button" className="link" onClick={() => navigate({ type: 'host', tab: 'storage' })}><Badge kind="err">offline</Badge></button>
+                : v && <div>
+                  <span title={loc.path}>{v.name}</span>: {fmtBytes(v.freeBytes)} free of {fmtBytes(v.totalBytes)}
+                  {v.totalBytes > 0 && <Meter fraction={1 - v.freeBytes / v.totalBytes} />}
+                </div>] as [string, ReactNode];
+            }) : [['Disk', <div>
               {fmtBytes(host.diskFreeBytes)} free of {fmtBytes(host.diskTotalBytes)}
               {host.diskTotalBytes > 0 && <Meter fraction={diskUsed} />}
-            </div>],
+            </div>] as [string, ReactNode]]),
           ]} />
         </Panel>
         <Panel title="Virtual machines">
@@ -38,6 +48,7 @@ export function HostSummary({ navigate }: { navigate: Navigate }) {
             ['Stopped', <span className="copy-line"><StateDot state="stopped" />{counts.stopped ?? 0}</span>],
             !!counts.suspended && ['Suspended', <span className="copy-line"><StateDot state="suspended" />{counts.suspended}</span>],
             !!counts.missing && ['Missing', <span className="copy-line"><StateDot state="missing" />{counts.missing}</span>],
+            !!counts.offline && ['Offline', <span className="copy-line"><StateDot state="offline" />{counts.offline}</span>],
             ['Memory configured', <span>
               {fmtMemMB(configuredMB)} across all VMs
               {host.memoryBytes > 0 && configuredMB * 2 ** 20 > host.memoryBytes &&

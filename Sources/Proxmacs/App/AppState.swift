@@ -4,7 +4,8 @@ import Observation
 
 struct VMItem: Identifiable, Hashable {
     var meta: VMMeta
-    /// Tart state ("running", "stopped", "suspended") or "missing" if Tart doesn't know the VM.
+    /// Tart state ("running", "stopped", "suspended"), "missing" if Tart doesn't know the VM, or
+    /// "offline" while VM storage is unavailable (drive disconnected).
     var state: String
     var ip: String?
     var cpus: Int?
@@ -85,6 +86,10 @@ final class AppState {
     /// Newest first, capped.
     private(set) var tasks: [TaskRecord] = []
     private(set) var memory: HostMemory?
+    private(set) var vmStorageOnline = true
+    private(set) var backupStorageOnline = true
+    /// Set while VM storage or backups are being moved; other actions wait.
+    private(set) var storageBusy: StorageKind?
     var status: String? {
         didSet { if let status { onStatus?(status) } }
     }
@@ -116,13 +121,16 @@ final class AppState {
             tart = Tart.locate()
             tartVersion = await tart?.version()
         }
+        vmStorageOnline = Storage.isAvailable(.vms)
+        backupStorageOnline = Storage.isAvailable(.backups)
         guard let tart else { vms = []; return }
 
-        let states = Dictionary(((try? await tart.list()) ?? []).map { ($0.name, $0.state) }, uniquingKeysWith: { a, _ in a })
+        let online = vmStorageOnline && storageBusy != .vms
+        let states = online ? Dictionary(((try? await tart.list()) ?? []).map { ($0.name, $0.state) }, uniquingKeysWith: { a, _ in a }) : [:]
         vms = VMMeta.allNames().compactMap(VMMeta.load).map { meta in
-            let state = states[meta.name] ?? "missing"
+            let state = online ? states[meta.name] ?? "missing" : "offline"
             var item = VMItem(meta: meta, state: state, ip: state == "running" ? ips[meta.name] : nil)
-            Self.readTartConfig(into: &item)
+            if online { Self.readTartConfig(into: &item) }
             return item
         }
 
@@ -225,6 +233,8 @@ final class AppState {
 
     private func requireTart() throws -> Tart {
         guard let tart else { throw ProxmacsError("Tart is not installed (brew install openai/tools/tart)") }
+        if let busy = storageBusy { throw ProxmacsError("\(busy.label) is being moved; try again when that has finished") }
+        try Storage.require(.vms)
         return tart
     }
 
@@ -236,6 +246,7 @@ final class AppState {
         guard name.range(of: #"^[a-z0-9][a-z0-9-]{0,62}$"#, options: .regularExpression) != nil else {
             throw ProxmacsError("Name must be lowercase letters, digits and dashes")
         }
+        try Storage.require(.vms)
         if VMMeta.load(name) != nil || FileManager.default.fileExists(atPath: Paths.tartVMDir(name).path) {
             throw ProxmacsError("A VM named \(name) already exists")
         }
@@ -265,7 +276,9 @@ final class AppState {
         task.message("Creating VM \(name)…")
         try await tart.createLinux(name, diskSizeGB: request.diskGB)
         do {
-            try await tart.set(name, cpu: request.cpus, memoryMB: request.memoryMB, disk: base)
+            try await tart.set(name, cpu: request.cpus, memoryMB: request.memoryMB)
+            task.message("Copying base image…")
+            try await BackupManager.setDisk(name, from: base, tart: tart) { task.progress($0) }
             try await tart.set(name, diskSizeGB: request.diskGB)
 
             var config = request.cloudInit
@@ -415,11 +428,12 @@ final class AppState {
     // MARK: - Local backups
 
     func backup(_ vm: String, taskID: String? = nil) async {
-        let ok = await perform(vm, "Backup", taskID: taskID) { _ in
+        let ok = await perform(vm, "Backup", taskID: taskID) { task in
             let tart = try requireTart()
+            if storageBusy == .backups { throw ProxmacsError("Backups are being moved; try again when that has finished") }
             let running = item(vm)?.isRunning ?? false
             let keep = VMMeta.load(vm)?.backup.keep ?? 5
-            let info = try await BackupManager.backup(vm, running: running, tart: tart, keep: keep)
+            let info = try await BackupManager.backup(vm, running: running, tart: tart, keep: keep) { task.progress($0) }
             return info.record.consistent ? "Backup of \(vm) done" : "Backup of \(vm) done (crash-consistent: guest agent unreachable)"
         }
         guard ok, let meta = VMMeta.load(vm), meta.offsite.auto, let latest = BackupManager.list(vm).first else { return }
@@ -431,6 +445,7 @@ final class AppState {
     func restore(_ vm: String, _ backup: BackupInfo, taskID: String? = nil) async {
         await perform(vm, "Restore", taskID: taskID) { task in
             let tart = try requireTart()
+            try Storage.require(.backups)
             if VMMeta.load(vm) == nil || !FileManager.default.fileExists(atPath: Paths.tartVMDir(vm).path) {
                 try await recreate(vm, from: backup, tart: tart, task: task)
                 return "Recreated \(vm) from backup of \(backup.record.date.formatted())"
@@ -438,7 +453,7 @@ final class AppState {
             if item(vm)?.isRunning == true {
                 throw ProxmacsError("Stop the VM before restoring")
             }
-            try await BackupManager.restore(vm, from: backup, tart: tart)
+            try await BackupManager.restore(vm, from: backup, tart: tart) { task.progress($0) }
             return "Restored \(vm) from \(backup.record.date.formatted())"
         }
     }
@@ -461,7 +476,7 @@ final class AppState {
             try? FileManager.default.removeItem(at: tartDir.appending(path: file))
             try FileManager.default.copyItem(at: source, to: tartDir.appending(path: file))
         }
-        try await tart.set(vm, disk: disk)
+        try await BackupManager.setDisk(vm, from: disk, tart: tart) { task.progress($0) }
 
         var meta = (try? JSONDecoder.proxmacs.decode(VMMeta.self, from: Data(contentsOf: backup.url.appending(path: "meta.json"))))
             ?? VMMeta(name: vm, network: .nat, autostart: false)
@@ -496,6 +511,7 @@ final class AppState {
             return
         }
         await perform(vm, "Push to \(target.name)", taskID: taskID) { task in
+            try Storage.require(.backups)
             let backend = try target.backend()
             task.message("Uploading \(vm) to \(target.name)…")
             try await backend.push(vm: vm, backupDir: backup.url, record: backup.record) { task.progress($0) }
@@ -521,6 +537,8 @@ final class AppState {
         }
         var pulled: BackupInfo?
         let ok = await perform(vm, "Pull from \(target.name)", taskID: taskID) { task in
+            try Storage.require(.backups)
+            if storageBusy == .backups { throw ProxmacsError("Backups are being moved; try again when that has finished") }
             let backend = try target.backend()
             let snapshots = try await backend.snapshots(vm: vm)
             guard let snapshot = snapshots.first(where: { $0.id == snapshotID }) else {
@@ -562,6 +580,165 @@ final class AppState {
         } catch {
             return (false, error.localizedDescription)
         }
+    }
+
+    // MARK: - Storage
+
+    struct StoragePlan {
+        var kind: StorageKind
+        var old: URL
+        var new: URL
+        var custom: Bool
+        var moves: [(from: URL, to: URL)]
+        var crossVolume: Bool
+        var oldAvailable: Bool
+        /// Backups already present at the new location (left where they are).
+        var skipped: Int
+    }
+
+    /// Checks a move of VM storage or local backups to `path` (nil = back to the default on the
+    /// internal disk). Data reachable at the old location moves along; a new location that already
+    /// holds Proxmacs data of the same kind (a reconnected drive) is adopted as is.
+    func planStorageChange(_ kind: StorageKind, to path: String?) async throws -> StoragePlan {
+        if kind == .vms && Storage.tartHomeOverridden { throw ProxmacsError("VM storage is set by the TART_HOME environment variable") }
+        if let busy = storageBusy { throw ProxmacsError("\(busy.label) is already being moved") }
+        let old = Storage.canonical(Storage.url(kind))
+        let requested = path.map(Storage.canonical(path:)) ?? Storage.canonical(kind == .vms ? Paths.defaultTartHome : Paths.defaultBackups)
+        guard requested.path != old.path else { throw ProxmacsError("\(kind.label) is already at \(old.path)") }
+        let new = try path.map { try Storage.validate($0, for: kind) } ?? requested
+
+        await refresh()
+        guard activity.isEmpty else { throw ProxmacsError("Wait for running tasks to finish first") }
+        if kind == .vms, let running = vms.first(where: \.isRunning) {
+            throw ProxmacsError("Shut down all VMs first (\(running.name) is running)")
+        }
+
+        let oldAvailable = Storage.isAvailable(kind)
+        var moves: [(from: URL, to: URL)] = []
+        var skipped = 0
+        if oldAvailable {
+            let fm = FileManager.default
+            switch kind {
+            case .vms:
+                for name in VMMeta.allNames() {
+                    let from = old.appending(path: "vms/\(name)", directoryHint: .isDirectory)
+                    let to = new.appending(path: "vms/\(name)", directoryHint: .isDirectory)
+                    guard fm.fileExists(atPath: from.path) else { continue }
+                    if fm.fileExists(atPath: to.path) {
+                        throw ProxmacsError("\(new.path) already holds a VM named \(name); remove one of them first")
+                    }
+                    moves.append((from, to))
+                }
+            case .backups:
+                let vmDirs = (try? fm.contentsOfDirectory(atPath: old.path)) ?? []
+                for vm in vmDirs.sorted() where vm.range(of: #"^[a-z0-9][a-z0-9-]*$"#, options: .regularExpression) != nil {
+                    for entry in ((try? fm.contentsOfDirectory(atPath: old.appending(path: vm).path)) ?? []).sorted() {
+                        let from = old.appending(path: "\(vm)/\(entry)", directoryHint: .isDirectory)
+                        if entry.hasSuffix(".partial") { continue }
+                        let to = new.appending(path: "\(vm)/\(entry)", directoryHint: .isDirectory)
+                        if fm.fileExists(atPath: to.path) { skipped += 1; continue }
+                        moves.append((from, to))
+                    }
+                }
+            }
+        }
+        let crossVolume = !FileCopy.sameVolume(old, new)
+        if crossVolume, !moves.isEmpty, let volume = Storage.volume(containing: new) {
+            let needed = moves.reduce(Int64(0)) { $0 + FileCopy.allocatedSize(of: $1.from) }
+            if needed > volume.freeBytes {
+                throw ProxmacsError("Not enough space on \(volume.name): \(Self.bytes(needed)) needed, \(Self.bytes(volume.freeBytes)) free")
+            }
+        }
+        return StoragePlan(kind: kind, old: old, new: new, custom: path != nil, moves: moves, crossVolume: crossVolume,
+                           oldAvailable: oldAvailable, skipped: skipped)
+    }
+
+    func changeStorage(_ plan: StoragePlan, taskID: String? = nil) async throws {
+        if let busy = storageBusy { throw ProxmacsError("\(busy.label) is already being moved") }
+        storageBusy = plan.kind
+        do {
+            try await moveStorage(plan, taskID: taskID)
+        } catch {
+            storageBusy = nil
+            await refresh()
+            throw error
+        }
+        storageBusy = nil
+        await refresh()
+    }
+
+    private func moveStorage(_ plan: StoragePlan, taskID: String?) async throws {
+        let (kind, old, new, custom, moves) = (plan.kind, plan.old, plan.new, plan.custom, plan.moves)
+        let (crossVolume, oldAvailable, skipped) = (plan.crossVolume, plan.oldAvailable, plan.skipped)
+        try await performThrowing(nil, "Move \(kind.noun)", taskID: taskID) { task in
+            if custom { try Storage.prepare(new, for: kind) } else {
+                try FileManager.default.createDirectory(at: new, withIntermediateDirectories: true)
+            }
+            task.message("Moving \(moves.count) \(kind == .vms ? "VM" : "backup")\(moves.count == 1 ? "" : "s") to \(new.path)…")
+            try await Task.detached(priority: .userInitiated) {
+                try Self.transfer(moves, crossVolume: crossVolume, staging: new.appending(path: ".proxmacs-moving", directoryHint: .isDirectory)) {
+                    task.progress($0)
+                }
+            }.value
+
+            var settings = Storage.settings
+            settings[kind] = custom ? new.path : nil
+            try Storage.save(settings)
+            if kind == .vms {
+                try? FileManager.default.removeItem(at: old.appending(path: ".proxmacs-staging"))
+            }
+            var message = "\(kind.label) is now at \(new.path)"
+            if !oldAvailable {
+                message += "; the old location was not available, so nothing was moved"
+            } else if !moves.isEmpty {
+                message += " (moved \(moves.count) \(kind == .vms ? "VM" : "backup")\(moves.count == 1 ? "" : "s"))"
+            }
+            if skipped > 0 { message += "; \(skipped) backup(s) already present there were left at \(old.path)" }
+            return message
+        }
+    }
+
+    /// Copies everything first (sources untouched, so a failure changes nothing), then renames the
+    /// copies into place and deletes the sources. Within one volume it just renames.
+    private nonisolated static func transfer(_ moves: [(from: URL, to: URL)], crossVolume: Bool, staging: URL,
+                                             progress: @escaping (Double) -> Void) throws {
+        let fm = FileManager.default
+        if !crossVolume {
+            for (index, move) in moves.enumerated() {
+                try fm.createDirectory(at: move.to.deletingLastPathComponent(), withIntermediateDirectories: true)
+                try fm.moveItem(at: move.from, to: move.to)
+                progress(Double(index + 1) / Double(moves.count))
+            }
+            return
+        }
+        let total = Double(max(moves.reduce(Int64(0)) { $0 + FileCopy.size(of: $1.from) }, 1))
+        var done: Int64 = 0
+        try? fm.removeItem(at: staging)
+        try fm.createDirectory(at: staging, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: staging) }
+        for (index, move) in moves.enumerated() {
+            try FileCopy.copyTree(move.from, to: staging.appending(path: String(index))) { bytes in
+                done += bytes
+                progress(min(Double(done) / total, 0.99))
+            }
+        }
+        for (index, move) in moves.enumerated() {
+            try fm.createDirectory(at: move.to.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try fm.moveItem(at: staging.appending(path: String(index)), to: move.to)
+        }
+        for move in moves {
+            try? fm.removeItem(at: move.from)
+            // Drop emptied per-VM backup directories.
+            let parent = move.from.deletingLastPathComponent()
+            if (try? fm.contentsOfDirectory(atPath: parent.path))?.isEmpty == true, parent.lastPathComponent != "vms" {
+                try? fm.removeItem(at: parent)
+            }
+        }
+        progress(1)
+    }
+
+    private static func bytes(_ count: Int64) -> String {
+        ByteCountFormatter.string(fromByteCount: count, countStyle: .file)
     }
 
     // MARK: - Host helpers

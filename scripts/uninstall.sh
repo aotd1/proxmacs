@@ -9,8 +9,9 @@
 #   --keep-backups  keep local backups (backups/ in the data directory)
 #   --keep-app      keep Proxmacs.app installed (it is still quit; reset data only)
 #
-# Not touched: Tart itself (brew uninstall tart), Tart VMs not created by Proxmacs, and snapshots
-# already pushed to SMB shares or Proxmox Backup Servers.
+# Custom storage locations (VM storage / backups moved to an external drive) are cleaned up too when
+# their drive is connected. Not touched: Tart itself (brew uninstall tart), Tart VMs not created by
+# Proxmacs, and snapshots already pushed to SMB shares or Proxmox Backup Servers.
 set -euo pipefail
 
 DRY=0 YES=0 KEEP_VMS=0 KEEP_BACKUPS=0 KEEP_APP=0
@@ -21,7 +22,7 @@ for arg in "$@"; do
     --keep-vms) KEEP_VMS=1 ;;
     --keep-backups) KEEP_BACKUPS=1 ;;
     --keep-app) KEEP_APP=1 ;;
-    -h|--help) sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "unknown option: $arg (see --help)" >&2; exit 2 ;;
   esac
 done
@@ -30,6 +31,22 @@ BUNDLE_ID=dev.proxmacs.app
 SUPPORT="${PROXMACS_SUPPORT_DIR:-$HOME/Library/Application Support/Proxmacs}"
 AGENTS="$HOME/Library/LaunchAgents"
 DOMAIN="gui/$(id -u)"
+MARKER=.proxmacs-storage
+
+# Custom storage locations from the app's settings (empty = default).
+setting() {
+  [ -f "$SUPPORT/storage.json" ] || return 0
+  /usr/bin/python3 -c 'import json,sys; v=json.load(open(sys.argv[1])).get(sys.argv[2]); print(v or "")' \
+    "$SUPPORT/storage.json" "$1" 2>/dev/null || true
+}
+CUSTOM_VMS=$(setting vms)
+CUSTOM_BACKUPS=$(setting backups)
+if [ -z "${TART_HOME:-}" ] && [ -n "$CUSTOM_VMS" ]; then export TART_HOME="$CUSTOM_VMS"; fi
+VMS_OFFLINE=0
+if [ -n "$CUSTOM_VMS" ] && [ "${TART_HOME}" = "$CUSTOM_VMS" ] && [ ! -e "$CUSTOM_VMS/$MARKER" ]; then VMS_OFFLINE=1; fi
+BACKUPS_OFFLINE=0
+if [ -n "$CUSTOM_BACKUPS" ] && [ ! -e "$CUSTOM_BACKUPS/$MARKER" ]; then BACKUPS_OFFLINE=1; fi
+
 TART="$(command -v tart || true)"
 for candidate in /opt/homebrew/bin/tart /usr/local/bin/tart; do
   [ -n "$TART" ] || { [ -x "$candidate" ] && TART="$candidate"; } || true
@@ -52,7 +69,7 @@ VMS=$(
   } 2>/dev/null | grep -E '^[a-z0-9][a-z0-9-]*$' | sort -u || true
 )
 TART_VMS=""
-if [ -n "$TART" ]; then
+if [ -n "$TART" ] && [ "$VMS_OFFLINE" = 0 ]; then
   TART_VMS=$("$TART" list --source local --format json 2>/dev/null | /usr/bin/python3 -c \
     'import json,sys; print("\n".join(vm["Name"] for vm in json.load(sys.stdin)))' 2>/dev/null || true)
 fi
@@ -98,6 +115,12 @@ if [ -n "$VMS" ]; then
 else
   echo "VMs: none"
 fi
+if [ "$VMS_OFFLINE" = 1 ]; then
+  echo "  VM storage $CUSTOM_VMS is not connected: its VM disks are left in place."
+  echo "  (Connect the drive and run this again to remove them too.)"
+elif [ -n "$CUSTOM_VMS" ]; then
+  echo "  VM storage: $CUSTOM_VMS (removed if empty afterwards)"
+fi
 echo
 if [ -d "$SUPPORT" ]; then
   echo "Data directory: $SUPPORT ($(size "$SUPPORT"))"
@@ -108,6 +131,15 @@ if [ -d "$SUPPORT" ]; then
   echo "  (settings, offsite targets, secrets, web certificate, cloud-init seeds, logs, cached images)"
 else
   echo "Data directory: none"
+fi
+if [ -n "$CUSTOM_BACKUPS" ]; then
+  if [ "$BACKUPS_OFFLINE" = 1 ]; then
+    echo "Backups folder $CUSTOM_BACKUPS is not connected: left in place."
+  elif [ "$KEEP_BACKUPS" = 1 ]; then
+    echo "Backups folder $CUSTOM_BACKUPS kept ($(size "$CUSTOM_BACKUPS"))"
+  else
+    echo "Backups folder: $CUSTOM_BACKUPS ($(size "$CUSTOM_BACKUPS"), local backups)"
+  fi
 fi
 if [ -n "$APPS" ]; then
   echo
@@ -123,7 +155,7 @@ echo
 echo "Not touched: Tart itself, other Tart VMs, and snapshots on SMB shares / Proxmox Backup Servers."
 echo
 
-if [ -z "$VMS" ] && [ ! -d "$SUPPORT" ] && [ -z "$APPS" ] && [ "${#LEFTOVERS[@]}" -eq 0 ]; then
+if [ -z "$VMS" ] && [ ! -d "$SUPPORT" ] && [ -z "$APPS" ] && [ "${#LEFTOVERS[@]}" -eq 0 ] && [ -z "$CUSTOM_BACKUPS" ]; then
   echo "Nothing to remove."
   exit 0
 fi
@@ -145,7 +177,7 @@ run pkill -f 'Proxmacs cli serve' || true
 while read -r vm; do
   [ -n "$vm" ] || continue
   echo "Removing VM ${vm}…"
-  if [ -n "$TART" ] && tart_has "$vm"; then
+  if [ -n "$TART" ] && [ "$VMS_OFFLINE" = 0 ] && tart_has "$vm"; then
     # Graceful guest shutdown first; unloading the agent then ends the runner.
     run "$TART" stop "$vm" --timeout 30 2>/dev/null || true
   fi
@@ -155,6 +187,23 @@ while read -r vm; do
     run "$TART" delete "$vm"
   fi
 done <<< "$VMS"
+
+# Custom locations: only folders carrying the Proxmacs marker are touched.
+if [ -n "$CUSTOM_BACKUPS" ] && [ "$BACKUPS_OFFLINE" = 0 ] && [ "$KEEP_BACKUPS" = 0 ]; then
+  echo "Removing backups folder…"
+  run rm -rf "$CUSTOM_BACKUPS"
+fi
+if [ -n "$CUSTOM_VMS" ] && [ -e "$CUSTOM_VMS/$MARKER" ] && [ "$KEEP_VMS" = 0 ]; then
+  run rm -rf "$CUSTOM_VMS/.proxmacs-staging" "$CUSTOM_VMS/.proxmacs-moving"
+  if [ "$DRY" = 1 ]; then
+    echo "  would remove $CUSTOM_VMS once its VMs are deleted (unless it holds other Tart VMs)"
+  elif [ -z "$(find "$CUSTOM_VMS/vms" -mindepth 1 -maxdepth 1 2>/dev/null)" ]; then
+    echo "Removing VM storage folder…"
+    run rm -rf "$CUSTOM_VMS"
+  else
+    echo "Leaving $CUSTOM_VMS: it still holds other Tart VMs."
+  fi
+fi
 
 if [ -d "$SUPPORT" ]; then
   echo "Removing data directory…"

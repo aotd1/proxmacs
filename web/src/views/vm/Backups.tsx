@@ -71,7 +71,7 @@ export function BackupsView({ vm }: { vm: VM }) {
       <Panel title="Local backups" flush extra={
         <div className="actions">
           <ActionButton className="small" onClick={load}>Refresh</ActionButton>
-          <ActionButton className="primary small" disabled={vm.state === 'missing'} onClick={() => vmBackup(app.startTask, vm)}>Back up now</ActionButton>
+          <ActionButton className="primary small" disabled={vm.state === 'missing' || vm.state === 'offline'} onClick={() => vmBackup(app.startTask, vm)}>Back up now</ActionButton>
         </div>
       }>
         {error ? <Empty error>{error}</Empty> : !backups ? <Loading what="Loading backups…" /> : !backups.length ? <Empty>No local backups yet.</Empty> : (
