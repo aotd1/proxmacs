@@ -110,34 +110,34 @@ enum BackupManager {
     }
 
     /// The VM must be stopped.
-    static func restore(_ vm: String, from backup: BackupInfo, tart: Tart, progress: (@Sendable (Double) -> Void)? = nil) async throws {
+    static func restore(_ vm: String, from backup: BackupInfo, progress: (@Sendable (Double) -> Void)? = nil) async throws {
         try Storage.require(.backups)
-        try await setDisk(vm, from: backup.url.appending(path: "disk.img"), tart: tart, progress: progress)
+        try await setDisk(vm, from: backup.url.appending(path: "disk.img"), progress: progress)
         let nvram = Paths.tartVMDir(vm).appending(path: "nvram.bin")
         try? FileManager.default.removeItem(at: nvram)
         try clone(backup.url.appending(path: "nvram.bin"), to: nvram)
     }
 
-    /// `tart set --disk` from any volume. Tart copies the file with FileManager, which clones on the
-    /// same volume but writes every byte (sparse regions included) across volumes; so a disk from
-    /// another volume is first copied sparsely next to the VM, then handed to Tart as a clone.
-    static func setDisk(_ vm: String, from source: URL, tart: Tart, progress: (@Sendable (Double) -> Void)? = nil) async throws {
-        if FileCopy.sameVolume(source, Paths.tartHome) {
-            try await tart.set(vm, disk: source)
-            return
-        }
-        let staging = try stagingDir()
-        defer { removeStaging(staging) }
-        let staged = staging.appending(path: "disk.img")
+    /// Replaces the VM's disk with a copy of `source`, as `tart set --disk` does (copy next to the VM,
+    /// then swap it in). Done here rather than by Tart because Tart 2.x breaks when TART_HOME contains a
+    /// space (e.g. "/Volumes/My Drive"), and so a disk from another volume is copied sparsely: a clone
+    /// on the same volume, only the data regions across volumes.
+    static func setDisk(_ vm: String, from source: URL, progress: (@Sendable (Double) -> Void)? = nil) async throws {
+        let disk = Paths.tartVMDir(vm).appending(path: "disk.img")
+        guard FileManager.default.fileExists(atPath: disk.path) else { throw ProxmacsError("VM \(vm) has no disk at \(disk.path)") }
+        let temporary = disk.deletingLastPathComponent().appending(path: ".disk.img.\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: temporary) }
         let total = Double(max(FileCopy.size(of: source), 1))
         try await Task.detached(priority: .userInitiated) {
             var done: Int64 = 0
-            try FileCopy.copy(source, to: staged) { bytes in
+            try FileCopy.copy(source, to: temporary) { bytes in
                 done += bytes
                 progress?(Double(done) / total)
             }
         }.value
-        try await tart.set(vm, disk: staged)
+        guard rename(temporary.path, disk.path) == 0 else {
+            throw ProxmacsError("Cannot replace \(disk.path): \(String(cString: strerror(errno)))")
+        }
     }
 
     static func delete(_ backup: BackupInfo) throws {

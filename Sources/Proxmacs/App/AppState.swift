@@ -278,7 +278,7 @@ final class AppState {
         do {
             try await tart.set(name, cpu: request.cpus, memoryMB: request.memoryMB)
             task.message("Copying base image…")
-            try await BackupManager.setDisk(name, from: base, tart: tart) { task.progress($0) }
+            try await BackupManager.setDisk(name, from: base) { task.progress($0) }
             try await tart.set(name, diskSizeGB: request.diskGB)
 
             var config = request.cloudInit
@@ -453,7 +453,7 @@ final class AppState {
             if item(vm)?.isRunning == true {
                 throw ProxmacsError("Stop the VM before restoring")
             }
-            try await BackupManager.restore(vm, from: backup, tart: tart) { task.progress($0) }
+            try await BackupManager.restore(vm, from: backup) { task.progress($0) }
             return "Restored \(vm) from \(backup.record.date.formatted())"
         }
     }
@@ -476,7 +476,7 @@ final class AppState {
             try? FileManager.default.removeItem(at: tartDir.appending(path: file))
             try FileManager.default.copyItem(at: source, to: tartDir.appending(path: file))
         }
-        try await BackupManager.setDisk(vm, from: disk, tart: tart) { task.progress($0) }
+        try await BackupManager.setDisk(vm, from: disk) { task.progress($0) }
 
         var meta = (try? JSONDecoder.proxmacs.decode(VMMeta.self, from: Data(contentsOf: backup.url.appending(path: "meta.json"))))
             ?? VMMeta(name: vm, network: .nat, autostart: false)
