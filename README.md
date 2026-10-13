@@ -8,7 +8,16 @@ A Proxmox-flavoured menubar VM manager for Apple Silicon Macs, built on [Tart](h
   Provisioned with cloud-init: your `~/.ssh/*.pub` keys, an optional console password, and tart-guest-agent.
 - **Backups**: instant APFS clones. When the guest agent is reachable, the root filesystem is frozen during the clone.
   Daily schedule and retention can be set per VM.
-- **VMs outlive the app**: each VM runs as `tart run` under its own LaunchAgent (`dev.proxmacs.vm.<name>`).
+- **Offsite backups** push local backups as deduplicated, incremental 4 MiB chunks (only changed chunks travel):
+  - **SMB share**: a PBS-like chunk store (`proxmacs-store/`) on any SMB share, mounted on demand via NetFS.
+  - **Proxmox Backup Server**: a native Swift client for the PBS backup/reader protocols (HTTP/2 upgrade,
+    `disk.img.fidx` + blobs, zstd), authenticated with an API token and certificate fingerprint pinning.
+  - Pull a remote snapshot back into local backups. If the VM no longer exists, pulling recreates it.
+- **Web UI**, Proxmox-style, at `https://<mac>:8006`: password login, VM list and actions, task log,
+  backups/offsite management, and a browser serial console (xterm.js over WebSocket).
+- **VMs outlive the app**: each VM runs under its own LaunchAgent (`dev.proxmacs.vm.<name>`) as
+  `Proxmacs cli run-vm <name>`, which supervises `tart run` and owns the serial console
+  (socket `/tmp/proxmacs-<uid>/<name>.sock`, scrollback in `vms/<name>/console.log`).
   Optionally, a VM starts on login.
 
 ## Requirements
@@ -38,6 +47,31 @@ $P cli backup web1 && $P cli backups web1
 $P cli stop web1 && $P cli restore web1 0 && $P cli start web1
 ```
 
+### Offsite
+
+```bash
+$P cli target-add smb nas smb://backup@nas.local/vmbackups/proxmacs --keep 14   # prompts for the password
+$P cli target-add pbs pbs1 --host pbs.lan --datastore store1 --auth-id 'proxmacs@pbs!mac' \
+      --fingerprint 'aa:bb:…' --keep 14                                           # prompts for the token secret
+$P cli target-test pbs1
+$P cli push web1 pbs1            # newest local backup → PBS
+$P cli remote pbs1 web1          # list snapshots
+$P cli pull pbs1 web1            # newest snapshot → local backups (recreates web1 if it's gone)
+```
+
+The PBS token needs `DatastoreBackup` on the datastore, or the namespace if you use one. Pruning remote
+snapshots also needs `Datastore.Prune`; without it, pushes still succeed and the task notes that pruning failed.
+
+### Web UI
+
+```bash
+$P cli web-passwd                # or Proxmacs menu → Web UI → Set Password…
+$P cli serve                     # headless, without the menubar
+```
+
+Settings live in `web.json` (`enabled`, `port` 8006, `bind` 0.0.0.0, `tls` true). The self-signed certificate's
+SHA-256 fingerprint is printed by `serve`, so you can check it against the browser warning.
+
 ## Layout
 
 | Path | Contents |
@@ -45,6 +79,10 @@ $P cli stop web1 && $P cli restore web1 0 && $P cli start web1
 | `~/Library/Application Support/Proxmacs/images/` | cached base images (`*.raw`) and the agent `.deb` |
 | `~/Library/Application Support/Proxmacs/vms/<name>/` | `meta.json`, `seed.iso` (cloud-init), `run.log` |
 | `~/Library/Application Support/Proxmacs/backups/<name>/<timestamp>/` | cloned `disk.img`, `nvram.bin`, `config.json` |
+| `~/Library/Application Support/Proxmacs/offsite.json` | offsite targets |
+| `~/Library/Application Support/Proxmacs/secrets.json` | SMB passwords, PBS token secrets, web password hash (mode 0600) |
+| `~/Library/Application Support/Proxmacs/web.json` | web UI settings |
+| `~/Library/Application Support/Proxmacs/web/` | self-signed `cert.pem` / `key.pem` |
 | `~/.tart/vms/<name>/` | Tart's VM (owned by Tart) |
 | `~/Library/LaunchAgents/dev.proxmacs.vm.<name>.plist` | per-VM runner |
 
@@ -52,5 +90,7 @@ $P cli stop web1 && $P cli restore web1 0 && $P cli start web1
 
 - Only arm64 guests boot. amd64 cloud images are rejected.
 - Bridge over wired Ethernet. Wi-Fi access points often drop frames from bridged MACs.
-- Backups live on the same disk. Off-host copies (`tart push` to an OCI registry, or restic) are future work.
+- Local backups live on the same disk; push them offsite (SMB/PBS) for real protection.
+- Secrets are kept in an owner-only file rather than the Keychain: the login Keychain prompts after every rebuild
+  of an ad-hoc-signed binary.
 - Tart is licensed under FSL-1.1-ALv2: fine for personal and internal use.

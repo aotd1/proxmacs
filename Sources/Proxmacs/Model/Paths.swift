@@ -4,7 +4,13 @@ import Foundation
 enum Paths {
     static let home = FileManager.default.homeDirectoryForCurrentUser
 
-    static let support = home.appending(path: "Library/Application Support/Proxmacs", directoryHint: .isDirectory)
+    /// `PROXMACS_SUPPORT_DIR` overrides the data directory (development/testing).
+    static let support: URL = {
+        if let custom = ProcessInfo.processInfo.environment["PROXMACS_SUPPORT_DIR"], !custom.isEmpty {
+            return URL(fileURLWithPath: custom, isDirectory: true)
+        }
+        return home.appending(path: "Library/Application Support/Proxmacs", directoryHint: .isDirectory)
+    }()
     static let images = support.appending(path: "images", directoryHint: .isDirectory)
     static let vms = support.appending(path: "vms", directoryHint: .isDirectory)
     static let backups = support.appending(path: "backups", directoryHint: .isDirectory)

@@ -44,6 +44,10 @@ struct MenuContent: View {
 
             Divider()
 
+            WebUISection()
+
+            Divider()
+
             HStack {
                 Button("New VM…") {
                     openWindow(id: "new-vm")
@@ -61,5 +65,65 @@ struct MenuContent: View {
         }
         .padding(12)
         .frame(width: 380)
+    }
+}
+
+struct WebUISection: View {
+    @Environment(AppState.self) private var state
+    private var server: WebServer { WebServer.shared }
+    @State private var settings = WebSettings.load()
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text("Web UI").font(.subheadline.weight(.medium))
+                Spacer()
+                Toggle("", isOn: Binding(get: { settings.enabled }, set: { enabled in
+                    settings.enabled = enabled
+                    try? settings.save()
+                    if enabled { server.start(state: state) } else { server.stop() }
+                }))
+                .toggleStyle(.switch)
+                .controlSize(.mini)
+                .labelsHidden()
+            }
+            if settings.enabled {
+                if let error = server.lastError {
+                    Text(error).font(.caption).foregroundStyle(.red).lineLimit(3)
+                } else if let url = server.url {
+                    HStack(spacing: 8) {
+                        Button(url) { if let link = URL(string: url) { NSWorkspace.shared.open(link) } }
+                            .buttonStyle(.link)
+                            .font(.caption)
+                        Spacer()
+                        Button(WebAuth.hasPassword ? "Change Password…" : "Set Password…", action: setPassword)
+                            .font(.caption)
+                    }
+                    if !WebAuth.hasPassword {
+                        Text("Set an admin password to log in.").font(.caption).foregroundStyle(.orange)
+                    }
+                }
+            }
+        }
+        .buttonStyle(.borderless)
+    }
+
+    private func setPassword() {
+        let alert = NSAlert()
+        alert.messageText = "Web UI admin password"
+        alert.informativeText = "At least 8 characters. Used to log in at \(server.url ?? "the web UI")."
+        let field = NSSecureTextField(frame: NSRect(x: 0, y: 0, width: 260, height: 24))
+        alert.accessoryView = field
+        alert.addButton(withTitle: "Save")
+        alert.addButton(withTitle: "Cancel")
+        alert.window.initialFirstResponder = field
+        activateApp()
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        do {
+            try WebAuth.setPassword(field.stringValue)
+            state.status = "Web UI password saved"
+        } catch {
+            state.lastError = error.localizedDescription
+        }
     }
 }

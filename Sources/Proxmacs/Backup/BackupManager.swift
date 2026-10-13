@@ -5,12 +5,16 @@ struct BackupRecord: Codable, Hashable {
     /// True when the guest filesystem was frozen during the snapshot (or the VM was stopped).
     var consistent: Bool
     var vmWasRunning: Bool
+    /// Offsite target name when the backup was pulled from a remote snapshot.
+    var source: String? = nil
 }
 
 struct BackupInfo: Identifiable, Hashable {
     var url: URL
     var record: BackupRecord
     var id: String { url.path }
+    /// Directory name; stable id used by the web API.
+    var name: String { url.lastPathComponent }
 }
 
 /// Backups are APFS clones of Tart's VM files: instant and copy-on-write, but on the same volume.

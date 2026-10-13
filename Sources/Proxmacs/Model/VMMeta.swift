@@ -18,13 +18,38 @@ struct BackupPolicy: Codable, Hashable {
     var keep = 5
 }
 
+struct OffsitePolicy: Codable, Hashable {
+    /// Offsite target ids this VM is pushed to.
+    var targets: [String] = []
+    /// Push automatically after every local backup.
+    var auto = false
+}
+
 /// Proxmacs-side metadata for a VM. Tart's own config.json holds CPU/memory/MAC/disk.
 struct VMMeta: Codable, Hashable {
     var name: String
     var network: NetworkMode
     var autostart: Bool
     var backup = BackupPolicy()
+    var offsite = OffsitePolicy()
     var created = Date()
+
+    init(name: String, network: NetworkMode, autostart: Bool) {
+        self.name = name
+        self.network = network
+        self.autostart = autostart
+    }
+
+    // Tolerate metadata written by older versions (missing keys fall back to defaults).
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        name = try c.decode(String.self, forKey: .name)
+        network = try c.decode(NetworkMode.self, forKey: .network)
+        autostart = try c.decodeIfPresent(Bool.self, forKey: .autostart) ?? false
+        backup = try c.decodeIfPresent(BackupPolicy.self, forKey: .backup) ?? BackupPolicy()
+        offsite = try c.decodeIfPresent(OffsitePolicy.self, forKey: .offsite) ?? OffsitePolicy()
+        created = try c.decodeIfPresent(Date.self, forKey: .created) ?? Date()
+    }
 
     static func load(_ name: String) -> VMMeta? {
         guard let data = try? Data(contentsOf: Paths.metaFile(name)) else { return nil }

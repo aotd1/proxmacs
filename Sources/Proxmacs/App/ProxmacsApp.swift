@@ -1,7 +1,13 @@
 import SwiftUI
 
 struct ProxmacsApp: App {
-    @State private var state = AppState()
+    @State private var state: AppState
+
+    init() {
+        let state = AppState()
+        _state = State(initialValue: state)
+        WebServer.shared.start(state: state)
+    }
 
     var body: some Scene {
         MenuBarExtra {

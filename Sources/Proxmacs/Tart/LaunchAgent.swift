@@ -1,7 +1,8 @@
 import Foundation
 
-/// Each VM runs as `tart run` under its own user LaunchAgent, so VMs outlive the menubar app
-/// and can start at login (`RunAtLoad`).
+/// Each VM runs under its own user LaunchAgent, so VMs outlive the menubar app and can start at
+/// login (`RunAtLoad`). The job runs `Proxmacs cli run-vm <name>` (see VMRunner), which owns the
+/// serial console and supervises `tart run`.
 enum LaunchAgent {
     static func label(_ vm: String) -> String { "dev.proxmacs.vm.\(vm)" }
     static func plistURL(_ vm: String) -> URL { Paths.launchAgents.appending(path: "\(label(vm)).plist") }
@@ -9,26 +10,37 @@ enum LaunchAgent {
     private static var domain: String { "gui/\(getuid())" }
     private static let launchctl = "/bin/launchctl"
 
-    static func runArguments(tart: Tart, meta: VMMeta) -> [String] {
-        var args = [tart.path, "run", meta.name, "--no-graphics", "--serial", "--disk", "\(Paths.seedISO(meta.name).path):ro"]
+    /// Arguments for `tart` (without the executable) as run by VMRunner.
+    static func tartRunArguments(meta: VMMeta, serialPath: String) -> [String] {
+        var args = ["run", meta.name, "--no-graphics", "--serial-path", serialPath]
+        // VMs recreated from a backup have no seed: cloud-init already ran on their disk.
+        if FileManager.default.fileExists(atPath: Paths.seedISO(meta.name).path) {
+            args += ["--disk", "\(Paths.seedISO(meta.name).path):ro"]
+        }
         if case .bridged(let iface) = meta.network {
             args.append("--net-bridged=\(iface)")
         }
         return args
     }
 
+    /// This binary (menubar app or CLI build), which provides `cli run-vm`.
+    static var selfExecutable: String {
+        Bundle.main.executablePath ?? ProcessInfo.processInfo.arguments[0]
+    }
+
     static func write(tart: Tart, meta: VMMeta) throws {
         var env = [
             "HOME": Paths.home.path,
             "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
-            // Makes Foundation unbuffer stdout so the "open pty" line reaches run.log immediately.
             "NSUnbufferedIO": "YES",
         ]
-        if let tartHome = ProcessInfo.processInfo.environment["TART_HOME"] { env["TART_HOME"] = tartHome }
+        for key in ["TART_HOME", "PROXMACS_SUPPORT_DIR"] {
+            if let value = ProcessInfo.processInfo.environment[key] { env[key] = value }
+        }
 
         let plist: [String: Any] = [
             "Label": label(meta.name),
-            "ProgramArguments": runArguments(tart: tart, meta: meta),
+            "ProgramArguments": [selfExecutable, "cli", "run-vm", meta.name],
             "RunAtLoad": meta.autostart,
             "KeepAlive": false,
             "ProcessType": "Interactive",
@@ -46,7 +58,6 @@ enum LaunchAgent {
 
     /// (Re)loads the job from its plist and starts it. Call only while the VM is stopped.
     static func start(_ vm: String) async throws {
-        // Truncate the log so the console lookup only sees this boot's pty.
         try? Data().write(to: Paths.runLog(vm))
         // Reload so plist edits (network, autostart) take effect.
         await unload(vm)
