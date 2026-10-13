@@ -100,6 +100,23 @@ SHA-256 fingerprint is printed by `serve`, so you can check it against the brows
 | `~/.tart/vms/<name>/` | Tart's VM (owned by Tart) |
 | `~/Library/LaunchAgents/dev.proxmacs.vm.<name>.plist` | per-VM runner |
 
+## Uninstall
+
+```bash
+./scripts/uninstall.sh --dry-run     # show what would be removed
+./scripts/uninstall.sh               # asks you to type 'uninstall'
+```
+
+The script quits the app and stops every Proxmacs VM. It then removes:
+
+- their launch agents
+- their Tart VMs
+- the data directory: settings, secrets, certificate, seeds, logs, cached images and local backups
+- the app bundle(s), preferences, caches and the console sockets
+
+Options: `--keep-vms`, `--keep-backups`, `--keep-app`, `--yes`. Tart itself, Tart VMs that Proxmacs didn't create,
+and snapshots already pushed to SMB or PBS are left alone.
+
 ## Notes
 
 - Only arm64 guests boot. amd64 cloud images are rejected.
