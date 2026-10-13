@@ -2,6 +2,8 @@
 
 A Proxmox-flavoured menubar VM manager for Apple Silicon Macs, built on [Tart](https://github.com/openai/tart).
 
+![Web UI: host summary](docs/host-summary.png)
+
 - **Bridged networking**: VMs get their own LAN IP. Tart's official build is signed with Apple's
   `com.apple.vm.networking` entitlement, so it can use Virtualization.framework's native bridge.
 - **Cloud images**: Debian 13 arm64 genericcloud, downloaded and converted from qcow2 to raw natively (no qemu-img).
@@ -29,6 +31,18 @@ A Proxmox-flavoured menubar VM manager for Apple Silicon Macs, built on [Tart](h
   `Proxmacs cli run-vm <name>`, which supervises `tart run` and owns the serial console
   (socket `/tmp/proxmacs-<uid>/<name>.sock`, scrollback in `vms/<name>/console.log`).
   Optionally, a VM starts on login.
+
+## Screenshots
+
+| | |
+| --- | --- |
+| ![VM summary](docs/vm-summary.png) VM summary | ![Serial console](docs/vm-console.png) Serial console in the browser |
+| ![Create VM](docs/create-vm.png) Create VM | ![Cloud-init](docs/vm-cloudinit.png) Cloud-init settings |
+| ![Hardware](docs/vm-hardware.png) Hardware | ![Backups](docs/vm-backups.png) Local backups and schedule |
+| ![Storage](docs/host-storage.png) VM disks and backups on an external drive | ![Backup targets](docs/host-targets.png) Offsite targets (SMB, Proxmox Backup Server) |
+| ![Dark mode](docs/vm-summary-dark.png) Dark mode | <img src="docs/mobile-vm-summary.png" alt="Phone" width="180"> <img src="docs/mobile-menu.png" alt="Phone menu" width="180"><br>On a phone |
+
+Regenerate them with `scripts/docs-screenshots.swift` (see the comment at its top).
 
 ## Requirements
 

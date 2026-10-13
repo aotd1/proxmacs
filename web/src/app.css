@@ -328,6 +328,7 @@ fieldset { border: none; padding: 0; margin: 0; min-width: 0; }
 .table tr:last-child td { border-bottom: none; }
 .table .actions { display: flex; gap: 6px; justify-content: flex-end; flex-wrap: wrap; align-items: center; }
 .table td.actions-cell { text-align: right; }
+.panel-header .actions { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
 .table .wrap { overflow-wrap: anywhere; }
 
 /* console */
