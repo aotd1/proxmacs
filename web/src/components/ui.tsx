@@ -4,9 +4,12 @@ import { useToast } from './Toasts';
 
 export const Spinner = ({ title }: { title?: string }) => <span className="spinner" title={title} />;
 
-export function Panel({ title, extra, flush, children }: { title: ReactNode; extra?: ReactNode; flush?: boolean; children: ReactNode }) {
+/** `narrow` keeps forms at a readable width on wide screens. */
+export function Panel({ title, extra, flush, narrow, children }: {
+  title: ReactNode; extra?: ReactNode; flush?: boolean; narrow?: boolean; children: ReactNode;
+}) {
   return (
-    <section className="panel">
+    <section className={`panel${narrow ? ' narrow' : ''}`}>
       <div className="panel-header">
         <h3>{title}</h3>
         {extra && <><div className="spacer" />{extra}</>}

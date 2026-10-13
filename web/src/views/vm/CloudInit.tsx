@@ -50,7 +50,7 @@ export function CloudInitView({ vm }: { vm: VM; navigate: Navigate }) {
           This VM has no cloud-init seed (it was recreated from a backup). Saving creates one; cloud-init then applies these settings on the next start.
         </div>
       )}
-      <Panel title="Cloud-Init">
+      <Panel title="Cloud-Init" narrow>
         <form onSubmit={submit} autoComplete="off">
           <fieldset disabled={busy}>
             <GuestFields value={form} onChange={setForm} passwordState={vm.cloudInit.password} natHint={vm.network.mode === 'nat'} />

@@ -41,6 +41,9 @@ export function usePoller(fn: () => Promise<void>, ms: number, enabled = true): 
   return useCallback(() => nowRef.current(), []);
 }
 
+/** Phone-sized layout; keep in sync with the 760px breakpoint in app.css. */
+export const NARROW = '(max-width: 760px)';
+
 export function useLocalStorage<T>(key: string, initial: T): [T, (value: T) => void] {
   const [value, setValue] = useState<T>(() => {
     try {

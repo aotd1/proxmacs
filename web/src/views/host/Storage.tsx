@@ -21,9 +21,11 @@ export function StorageView() {
       {storage.busy && (
         <div className="note"><Spinner /> Moving {LABELS[storage.busy].noun}… VMs can’t be started or backed up until it finishes; progress is in the task log.</div>
       )}
-      <StoragePanel kind="vms" status={storage} />
-      <StoragePanel kind="backups" status={storage} />
-      <div className="muted small">
+      <div className="cols">
+        <StoragePanel kind="vms" status={storage} />
+        <StoragePanel kind="backups" status={storage} />
+      </div>
+      <div className="muted small prose">
         <p>
           VM disks and local backups can live on an external drive formatted as APFS; settings, cloud-init seeds and logs stay on this Mac.
           Backups are instant clones when they share a drive with the VMs, and copies otherwise (the VM is frozen only for the clone).

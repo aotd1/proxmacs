@@ -1,7 +1,7 @@
 import { createContext, useCallback, useContext, useMemo, useRef, useState, type ReactNode } from 'react';
 import { api, AuthError } from './api';
 import { useToast } from './components/Toasts';
-import { useLocalStorage, usePoller } from './hooks';
+import { NARROW, useLocalStorage, usePoller } from './hooks';
 import type { Host, HostStats, NetInterface, StorageStatus, Target, Task, VM } from './types';
 
 /** Samples kept for the host memory chart (3 s apart → 6 minutes). */
@@ -61,7 +61,7 @@ export function AppDataProvider({ children }: { children: ReactNode }) {
   const [interfaces, setInterfaces] = useState<NetInterface[]>([]);
   const [storage, setStorage] = useState<StorageStatus | null>(null);
   const [taskEpoch, setTaskEpoch] = useState<Record<string, number>>({});
-  const [tasksOpen, setTasksOpen] = useLocalStorage('proxmacs.tasksOpen', true);
+  const [tasksOpen, setTasksOpen] = useLocalStorage('proxmacs.tasksOpen', !matchMedia(NARROW).matches);
 
   const taskStatus = useRef(new Map<string, Task['status']>());
   const seeded = useRef(false);

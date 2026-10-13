@@ -11,7 +11,7 @@ export function OffsiteView({ vm, navigate }: { vm: VM; navigate: Navigate }) {
   const app = useApp();
   return (
     <>
-      <Panel title="Offsite settings">
+      <Panel title="Offsite settings" narrow>
         {!app.targets.length ? (
           <Empty>
             <p>No backup targets configured.</p>

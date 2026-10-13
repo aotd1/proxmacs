@@ -28,24 +28,36 @@ export type Navigate = (route: Route) => void;
 
 export function Shell({ onLogout }: { onLogout: () => void }) {
   const app = useApp();
-  const [rawRoute, navigate] = useHashRoute();
+  const [rawRoute, setRoute] = useHashRoute();
   const [creating, setCreating] = useState(false);
+  // The resource tree is a slide-out menu on narrow screens.
+  const [navOpen, setNavOpen] = useState(false);
+  const navigate: Navigate = (next) => { setNavOpen(false); setRoute(next); };
 
   // Fall back to the host when the VM is gone; unknown tabs show the summary.
   let route = rawRoute;
   if (route.type === 'vm' && app.loaded && !app.vm(route.name)) route = { type: 'host', tab: 'summary' };
   const tabs = route.type === 'vm' ? VM_TABS : HOST_TABS;
   if (!tabs.some(([id]) => id === route.tab)) route = { ...route, tab: 'summary' };
+  // Rewrite the URL only when the route was corrected; otherwise a render that lands between a URL
+  // change and its hashchange event would put the old route back.
   useEffect(() => {
     const hash = routeHash(route);
-    if (app.loaded && location.hash !== hash) history.replaceState(null, '', hash);
+    if (app.loaded && routeHash(rawRoute) !== hash && location.hash !== hash) history.replaceState(null, '', hash);
   });
+  useEffect(() => {
+    if (!navOpen) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setNavOpen(false); };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [navOpen]);
 
   return (
     <div id="app">
-      <Topbar onCreate={() => setCreating(true)} onLogout={onLogout} navigate={navigate} />
+      <Topbar onCreate={() => setCreating(true)} onLogout={onLogout} navigate={navigate} navOpen={navOpen} onToggleNav={() => setNavOpen(!navOpen)} />
       <div className="main">
-        <Tree route={route} navigate={navigate} />
+        <Tree route={route} navigate={navigate} open={navOpen} onLogout={onLogout} />
+        {navOpen && <div className="nav-backdrop" onClick={() => setNavOpen(false)} />}
         <section className="content">
           {app.loaded ? <Content route={route} navigate={navigate} /> : <Loading />}
         </section>
@@ -56,7 +68,9 @@ export function Shell({ onLogout }: { onLogout: () => void }) {
   );
 }
 
-function Topbar({ onCreate, onLogout, navigate }: { onCreate: () => void; onLogout: () => void; navigate: Navigate }) {
+function Topbar({ onCreate, onLogout, navigate, navOpen, onToggleNav }: {
+  onCreate: () => void; onLogout: () => void; navigate: Navigate; navOpen: boolean; onToggleNav: () => void;
+}) {
   const { host, stats, tasks, online, storage, setTasksOpen } = useApp();
   const offline = storage ? (['vms', 'backups'] as const).filter((k) => !storage[k].available) : [];
   const running = tasks.filter((t) => t.status === 'running').length;
@@ -64,7 +78,10 @@ function Topbar({ onCreate, onLogout, navigate }: { onCreate: () => void; onLogo
   const usedPct = memory ? Math.round((memory.used / memory.total) * 100) : null;
   return (
     <header className="topbar">
-      <div className="brand"><span className="brand-mark" aria-hidden="true" />Proxmacs</div>
+      <button type="button" className="nav-toggle" aria-label="Resources" aria-expanded={navOpen} onClick={onToggleNav}>
+        <span aria-hidden="true" />
+      </button>
+      <div className="brand"><span className="brand-mark" aria-hidden="true" /><span className="brand-name">Proxmacs</span></div>
       <div className="host-info">
         {host && <>
           <strong>{host.hostname || 'host'}</strong>
@@ -77,7 +94,7 @@ function Topbar({ onCreate, onLogout, navigate }: { onCreate: () => void; onLogo
       {memory && usedPct != null && (
         <button type="button" className={`mem-indicator ${memory.pressure}`} title={`Memory pressure: ${memory.pressure}`}
           onClick={() => navigate({ type: 'host', tab: 'summary' })}>
-          <span>Memory</span>
+          <span className="wide-only">Memory</span>
           <span className="mini-meter"><span style={{ width: `${usedPct}%` }} /></span>
           <span className="mono">{usedPct}%</span>
         </button>
@@ -85,23 +102,25 @@ function Topbar({ onCreate, onLogout, navigate }: { onCreate: () => void; onLogo
       {offline.length > 0 && (
         <button type="button" className="btn storage-indicator" title="A storage drive is disconnected"
           onClick={() => navigate({ type: 'host', tab: 'storage' })}>
-          <Badge kind="err">{offline.map((k) => (k === 'vms' ? 'VM storage' : 'Backup storage')).join(' & ')} offline</Badge>
+          <Badge kind="err"><span className="wide-only">{offline.map((k) => (k === 'vms' ? 'VM storage' : 'Backup storage')).join(' & ')} </span>offline</Badge>
         </button>
       )}
-      {!online && <Badge kind="err">Connection lost</Badge>}
+      {!online && <Badge kind="err">Offline<span className="wide-only">: connection lost</span></Badge>}
       <button type="button" className={`task-indicator${running ? ' active' : ''}`} title="Show task log" onClick={() => setTasksOpen(true)}>
-        {running ? <><Spinner />{plural(running, 'task')} running</> : 'No running tasks'}
+        {running
+          ? <><Spinner /><span className="wide-only">{plural(running, 'task')} running</span><span className="narrow-only">{running}</span></>
+          : <><span className="wide-only">No running tasks</span><span className="narrow-only">Tasks</span></>}
       </button>
-      <button type="button" className="btn primary" onClick={onCreate}>Create VM</button>
-      <button type="button" className="btn" onClick={onLogout}>Log out</button>
+      <button type="button" className="btn primary" onClick={onCreate}><span className="wide-only">Create VM</span><span className="narrow-only">New VM</span></button>
+      <button type="button" className="btn wide-only" onClick={onLogout}>Log out</button>
     </header>
   );
 }
 
-function Tree({ route, navigate }: { route: Route; navigate: Navigate }) {
+function Tree({ route, navigate, open, onLogout }: { route: Route; navigate: Navigate; open: boolean; onLogout: () => void }) {
   const { host, vms } = useApp();
   return (
-    <nav className="tree-panel" aria-label="Resources">
+    <nav className={`tree-panel${open ? ' open' : ''}`} aria-label="Resources">
       <ul className="tree" role="tree">
         <li role="treeitem" aria-expanded="true">
           <button type="button" className={`tree-item${route.type === 'host' ? ' selected' : ''}`}
@@ -128,6 +147,9 @@ function Tree({ route, navigate }: { route: Route; navigate: Navigate }) {
           </ul>
         </li>
       </ul>
+      <div className="tree-footer narrow-only">
+        <button type="button" className="btn block" onClick={onLogout}>Log out</button>
+      </div>
     </nav>
   );
 }

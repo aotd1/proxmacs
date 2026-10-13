@@ -79,8 +79,10 @@ export function TargetsView() {
           </table>
         )}
       </Panel>
-      <Panel title="Add target"><AddTargetForm /></Panel>
-      {app.targets.length > 0 && <Panel title="Recover from offsite"><RecoverForm /></Panel>}
+      <div className="cols">
+        <Panel title="Add target"><AddTargetForm /></Panel>
+        {app.targets.length > 0 && <Panel title="Recover from offsite"><RecoverForm /></Panel>}
+      </div>
     </>
   );
 }

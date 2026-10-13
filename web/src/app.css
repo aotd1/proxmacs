@@ -133,7 +133,7 @@ select.small { height: 24px; font-size: 12px; padding: 0 4px; }
 .field > span:first-child { font-weight: 500; }
 .field .hint { color: var(--muted); font-size: 12px; }
 .check { display: inline-flex; align-items: center; gap: 8px; cursor: pointer; }
-.form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px 16px; }
+.form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px 16px; }
 .form-grid .span2 { grid-column: 1 / -1; }
 .form-row { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 12px 16px; }
 .form-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 14px; }
@@ -208,12 +208,24 @@ fieldset { border: none; padding: 0; margin: 0; min-width: 0; }
 
 /* ---------- App shell ---------- */
 
-#app { height: 100vh; display: grid; grid-template-rows: 46px minmax(0, 1fr) auto; }
+#app { height: 100vh; height: 100dvh; display: grid; grid-template-rows: 46px minmax(0, 1fr) auto; }
 .topbar {
   display: flex; align-items: center; gap: 10px; padding: 0 12px;
   background: var(--panel); border-bottom: 1px solid var(--border); min-width: 0;
 }
 .brand { display: flex; align-items: center; gap: 8px; font-weight: 700; font-size: 15px; white-space: nowrap; }
+.nav-toggle {
+  display: none; align-items: center; justify-content: center; width: 32px; height: 32px; flex: none; margin-left: -4px;
+  border: none; border-radius: var(--radius); background: none; color: var(--text); cursor: pointer;
+}
+.nav-toggle:hover { background: var(--hover); }
+.nav-toggle > span, .nav-toggle > span::before, .nav-toggle > span::after {
+  display: block; width: 16px; height: 2px; border-radius: 1px; background: currentColor; position: relative;
+}
+.nav-toggle > span::before, .nav-toggle > span::after { content: ""; position: absolute; left: 0; }
+.nav-toggle > span::before { top: -5px; }
+.nav-toggle > span::after { top: 5px; }
+.narrow-only, .nav-backdrop { display: none; }
 .host-info { display: flex; align-items: center; gap: 8px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
 .host-info strong { color: var(--text); font-weight: 600; }
 .task-indicator {
@@ -224,7 +236,7 @@ fieldset { border: none; padding: 0; margin: 0; min-width: 0; }
 .task-indicator.active { color: var(--text); border-color: var(--accent); }
 .task-indicator:hover { background: var(--hover); }
 
-.main { display: grid; grid-template-columns: 230px minmax(0, 1fr); min-height: 0; }
+.main { display: grid; grid-template-columns: clamp(230px, 14vw, 320px) minmax(0, 1fr); min-height: 0; }
 
 /* tree */
 .tree-panel { background: var(--panel); border-right: 1px solid var(--border); overflow: auto; padding: 8px 0; }
@@ -264,7 +276,11 @@ fieldset { border: none; padding: 0; margin: 0; min-width: 0; }
 .tab.active { color: var(--text); background: var(--bg); border-color: var(--border); }
 .content-body { flex: 1; overflow: auto; padding: 16px; min-height: 0; }
 .content-body.full { display: flex; flex-direction: column; overflow: hidden; }
-.view { max-width: 1100px; }
+/* Content uses the full width; forms (.panel.narrow) and running text stay readable. */
+.panel.narrow { max-width: 960px; }
+.prose { max-width: 110ch; }
+.cols { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 480px), 1fr)); gap: 0 16px; align-items: start; }
+.cols > .panel.narrow { max-width: none; }
 .content-body.full > .view { flex: 1; display: flex; flex-direction: column; min-height: 0; max-width: none; }
 
 /* panels */
@@ -276,18 +292,18 @@ fieldset { border: none; padding: 0; margin: 0; min-width: 0; }
 }
 .panel-header h3 { font-size: 13px; }
 .panel-body { padding: 14px; }
-.panel-body.flush { padding: 0; }
+.panel-body.flush { padding: 0; overflow-x: auto; }
 .toolbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 16px; }
 .empty { padding: 18px 14px; color: var(--muted); text-align: center; }
 .error-text { color: var(--err); }
 .note { padding: 10px 12px; background: var(--info-bg); border-radius: var(--radius); margin-bottom: 12px; }
 
-.kv { display: grid; grid-template-columns: minmax(110px, 150px) minmax(0, 1fr); gap: 8px 16px; align-items: center; margin: 0; }
+.kv { display: grid; grid-template-columns: minmax(110px, 150px) minmax(0, 1fr); gap: 8px 16px; align-items: baseline; margin: 0; }
 .kv > dt { color: var(--muted); }
 .kv > dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
 .copy-line { display: inline-flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .copy-line code { overflow-wrap: anywhere; background: var(--panel-alt); border: 1px solid var(--border); border-radius: 4px; padding: 2px 6px; }
-.grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 0 16px; }
+.grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 340px), 1fr)); gap: 0 16px; }
 
 /* tables */
 .table { width: 100%; border-collapse: collapse; }
@@ -363,15 +379,57 @@ fieldset { border: none; padding: 0; margin: 0; min-width: 0; }
 .toast.ok { border-left-color: var(--ok); }
 @keyframes toast-in { from { transform: translateY(-6px); opacity: 0; } }
 
-/* narrow screens */
+/* Touch screens: larger targets; 16px inputs keep iOS Safari from zooming in on focus. */
+@media (pointer: coarse) {
+  .btn { height: 34px; }
+  .btn.small { height: 30px; padding: 0 10px; }
+  input[type=text], input[type=password], input[type=number], input[type=url], select { height: 36px; font-size: 16px; }
+  textarea { font-size: 16px; }
+  select.small { height: 30px; font-size: 14px; }
+  .tree-item { padding-top: 9px; padding-bottom: 9px; }
+}
+
+/* Phones and narrow windows: the resource tree becomes a slide-out menu. */
 @media (max-width: 760px) {
-  .main { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); }
-  .tree-panel { max-height: 150px; border-right: none; border-bottom: 1px solid var(--border); }
+  .wide-only { display: none !important; }
+  .narrow-only { display: revert; }
+  .topbar { gap: 6px; padding: 0 8px; }
+  .nav-toggle { display: inline-flex; }
   .host-info { display: none; }
-  .form-grid { grid-template-columns: 1fr; }
-  .kv { grid-template-columns: minmax(0, 1fr); gap: 2px 0; }
-  .kv > dd { margin-bottom: 8px; }
+  .task-indicator, .mem-indicator { padding: 0 8px; }
+  .mini-meter { width: 32px; }
+
+  .main { grid-template-columns: minmax(0, 1fr); }
+  .tree-panel {
+    position: fixed; top: 46px; bottom: 0; left: 0; z-index: 60; width: min(300px, 85vw);
+    display: flex; flex-direction: column; border-right: 1px solid var(--border); box-shadow: var(--shadow);
+    transform: translateX(-105%); visibility: hidden; transition: transform .2s ease, visibility 0s .2s;
+  }
+  .tree-panel.open { transform: none; visibility: visible; transition: transform .2s ease; }
+  .tree-panel > .tree { flex: 1; }
+  .tree-footer { padding: 12px; border-top: 1px solid var(--border); }
+  .nav-backdrop { display: block; position: fixed; inset: 46px 0 0; z-index: 50; background: var(--backdrop); }
+
+  .content-header { padding: 10px 12px 0; }
+  .tabbar { padding: 6px 12px 0; scrollbar-width: none; }
+  .tab { padding: 6px 10px; }
+  .content-body { padding: 12px; }
+  .panel-body { padding: 12px; }
+  .panel-header { padding: 8px 12px; }
+  .form-grid { grid-template-columns: minmax(0, 1fr); }
+  .kv { grid-template-columns: minmax(0, 110px) minmax(0, 1fr); gap: 8px 12px; }
+  .table th, .table td { padding-left: 8px; padding-right: 8px; }
   .task-msg { display: none; }
+  .tasks-body { height: 40vh; }
+  .modal-backdrop { padding: 8px; }
+  .modal { max-height: calc(100dvh - 16px); }
+  .mem-head { flex-wrap: wrap; gap: 4px 16px; }
+}
+@media (max-width: 480px) {
+  .brand-name { display: none; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .tree-panel { transition: none !important; }
 }
 
 /* ---------- Additions for the React UI ---------- */
@@ -433,9 +491,6 @@ input.narrow { width: 90px; }
 }
 .chip:hover { background: var(--hover); }
 
-@media (max-width: 760px) {
-  .mem-indicator > span:first-child { display: none; }
-}
 
 /* storage */
 .storage-form { margin-top: 14px; }

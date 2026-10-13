@@ -64,7 +64,7 @@ export function HardwareView({ vm, navigate }: { vm: VM; navigate: Navigate }) {
           {vm.state === 'running' ? 'Shut down the VM to change its hardware.' : `The VM is ${vm.state}; hardware can only be changed while it is stopped.`}
         </div>
       )}
-      <Panel title="Hardware">
+      <Panel title="Hardware" narrow>
         <form onSubmit={submit}>
           <fieldset disabled={!stopped || busy}>
             <div className="form-grid">
