@@ -3,7 +3,7 @@ import Hummingbird
 import HummingbirdWebSocket
 import NIOCore
 
-/// JSON API used by the browser UI (see Web/Assets/app.js).
+/// JSON API used by the browser UI (React app in web/, types in web/src/types.ts).
 struct WebAPI: Sendable {
     let state: AppState
     var secureCookies = true
@@ -64,6 +64,26 @@ struct WebAPI: Sendable {
                 "diskTotalBytes": values?.volumeTotalCapacity ?? 0,
             ])
         }
+        router.get("/api/host/stats") { _, _ in
+            let running = await MainActor.run { state.vms.filter(\.isRunning).map { $0.memoryMB ?? 0 } }
+            var json: [String: Any] = [
+                "time": Date().ISO8601Format(),
+                "loadAverage": HostStats.loadAverage(),
+                "runningVMs": running.count,
+                "vmMemoryBytes": running.reduce(0) { $0 + UInt64($1) * 1024 * 1024 },
+            ]
+            if let memory = HostStats.memory() {
+                json["memory"] = [
+                    "total": memory.total, "used": memory.used, "app": memory.app, "wired": memory.wired,
+                    "compressed": memory.compressed, "cached": memory.cached, "free": memory.free,
+                    "swapUsed": memory.swapUsed, "swapTotal": memory.swapTotal, "pressure": memory.pressureLabel,
+                ]
+            }
+            return API.json(json)
+        }
+        router.get("/api/host/sshkeys") { _, _ in
+            API.json(CloudInitSeed.sshPublicKeys())
+        }
         router.get("/api/interfaces") { _, _ in
             let interfaces = await NetworkInterfaces.list()
             let preferred = await NetworkInterfaces.defaultRoute()
@@ -98,7 +118,16 @@ struct WebAPI: Sendable {
     static func vmJSON(_ item: VMItem, activity: String?) -> [String: Any] {
         var network: [String: Any] = ["mode": "nat", "interface": NSNull()]
         if case .bridged(let iface) = item.meta.network { network = ["mode": "bridged", "interface": iface] }
+        let config = item.meta.effectiveCloudInit
+        let password = !config.managePassword && config.passwordHash == nil ? "unknown" : (config.passwordHash == nil ? "none" : "set")
+        let cloudInit: [String: Any] = [
+            "user": config.user, "password": password, "sshKeys": config.sshKeys, "legacy": item.meta.cloudInit == nil,
+            "network": ["dhcp": config.network.dhcp, "address": config.network.address as Any? ?? NSNull(),
+                        "gateway": config.network.gateway as Any? ?? NSNull(), "dns": config.network.dns],
+        ]
         return [
+            "cloudInit": cloudInit, "seedPending": item.meta.seedPending,
+            "hasSeed": FileManager.default.fileExists(atPath: Paths.seedISO(item.name).path),
             "name": item.name, "state": item.state, "ip": item.ip as Any? ?? NSNull(), "network": network,
             "cpus": item.cpus as Any? ?? NSNull(), "memoryMB": item.memoryMB as Any? ?? NSNull(), "diskGB": item.diskGB as Any? ?? NSNull(),
             "autostart": item.meta.autostart, "activity": activity as Any? ?? NSNull(),
@@ -118,22 +147,20 @@ struct WebAPI: Sendable {
             await API.guarded {
                 let body = try await API.body(request)
                 guard let name = body["name"] as? String else { throw APIError(message: "name is required") }
-                let network = body["network"] as? [String: Any]
-                var mode = NetworkMode.nat
-                if (network?["mode"] as? String) == "bridged" {
-                    var iface = network?["interface"] as? String
-                    if iface == nil { iface = await NetworkInterfaces.defaultRoute() }
-                    mode = .bridged(interface: iface ?? "en0")
-                }
+                let mode = await Self.networkMode(body["network"] as? [String: Any]) ?? .nat
                 let imageID = body["image"] as? String ?? "debian13"
                 let image: ImageSource = imageID == "debian13" ? .debian13 : .local(Paths.images.appending(path: (imageID as NSString).lastPathComponent))
                 let vmRequest = NewVMRequest(
                     name: name, cpus: body["cpus"] as? Int ?? 2, memoryMB: body["memoryMB"] as? Int ?? 2048,
                     diskGB: body["diskGB"] as? Int ?? 20, network: mode, image: image,
                     password: body["password"] as? String ?? "", autostart: body["autostart"] as? Bool ?? false,
-                    startNow: body["startNow"] as? Bool ?? true
+                    startNow: body["startNow"] as? Bool ?? true,
+                    user: body["user"] as? String ?? "debian",
+                    sshKeys: (body["sshKeys"] as? [Any]).map(Self.keys),
+                    guestNetwork: Self.guestNetwork(body["ipv4"] as? [String: Any])
                 )
                 try await state.validateNewVM(name)
+                try vmRequest.cloudInit.validate()
                 let task = Self.newTaskID()
                 Task { @MainActor in try? await state.create(vmRequest, taskID: task) }
                 return API.json(["task": task], status: .accepted)
@@ -163,6 +190,35 @@ struct WebAPI: Sendable {
                 let task = Self.newTaskID()
                 Task { @MainActor in await state.delete(name, taskID: task) }
                 return API.json(["task": task], status: .accepted)
+            }
+        }
+
+        router.put("/api/vms/:name/hardware") { request, context in
+            await API.guarded {
+                let name = try await Self.requireVM(state, context)
+                let body = try await API.body(request)
+                let change = HardwareChange(cpus: body["cpus"] as? Int, memoryMB: body["memoryMB"] as? Int, diskGB: body["diskGB"] as? Int,
+                                            network: await Self.networkMode(body["network"] as? [String: Any]))
+                try await state.editHardware(name, change)
+                return try await Self.currentVM(state, name)
+            }
+        }
+
+        router.put("/api/vms/:name/cloudinit") { request, context in
+            await API.guarded {
+                let name = try await Self.requireVM(state, context)
+                let body = try await API.body(request)
+                let password: PasswordChange = if let plain = body["password"] as? String, !plain.isEmpty {
+                    .set(plain)
+                } else if body["removePassword"] as? Bool == true {
+                    .remove
+                } else {
+                    .keep
+                }
+                guard let user = body["user"] as? String else { throw APIError(message: "user is required") }
+                try await state.editCloudInit(name, user: user, password: password, sshKeys: Self.keys(body["sshKeys"] as? [Any] ?? []),
+                                              network: Self.guestNetwork(body["ipv4"] as? [String: Any]))
+                return try await Self.currentVM(state, name)
             }
         }
 
@@ -337,6 +393,37 @@ struct WebAPI: Sendable {
     static func param(_ context: WebContext, _ name: String) throws -> String {
         guard let value = context.parameters.get(name), !value.isEmpty else { throw APIError(message: "missing \(name)") }
         return value
+    }
+
+    static func currentVM(_ state: AppState, _ name: String) async throws -> Response {
+        try await MainActor.run {
+            guard let item = state.vms.first(where: { $0.name == name }) else { throw APIError.notFound("VM \(name)") }
+            return API.json(vmJSON(item, activity: state.activity[name]))
+        }
+    }
+
+    static func networkMode(_ json: [String: Any]?) async -> NetworkMode? {
+        switch json?["mode"] as? String {
+        case "nat": return .nat
+        case "bridged":
+            let iface = (json?["interface"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+            if let iface { return .bridged(interface: iface) }
+            return .bridged(interface: await NetworkInterfaces.defaultRoute() ?? "en0")
+        default: return nil
+        }
+    }
+
+    static func guestNetwork(_ json: [String: Any]?) -> GuestNetwork {
+        guard let json, json["dhcp"] as? Bool == false else { return GuestNetwork() }
+        let trimmed = { (value: Any?) -> String? in
+            (value as? String).map { $0.trimmingCharacters(in: .whitespaces) }.flatMap { $0.isEmpty ? nil : $0 }
+        }
+        return GuestNetwork(dhcp: false, address: trimmed(json["address"]), gateway: trimmed(json["gateway"]),
+                            dns: ((json["dns"] as? [Any]) ?? []).compactMap(trimmed))
+    }
+
+    static func keys(_ list: [Any]) -> [String] {
+        list.compactMap { ($0 as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
     }
 
     static func requireVM(_ state: AppState, _ context: WebContext) async throws -> String {

@@ -36,7 +36,6 @@ let package = Package(
             ],
             path: "Sources/Proxmacs",
             // Served from disk (copied into the .app by scripts/build-app.sh), not via Bundle.module.
-            exclude: ["Web/Assets"],
             linkerSettings: [.linkedFramework("NetFS")]
         ),
         .testTarget(

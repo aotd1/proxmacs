@@ -20,6 +20,10 @@ struct MenuContent: View {
                     .textSelection(.enabled)
             }
 
+            if let memory = state.memory {
+                MemoryGauge(memory: memory, vmBytes: state.vms.filter(\.isRunning).reduce(0) { $0 + UInt64($1.memoryMB ?? 0) * 1_048_576 })
+            }
+
             Divider()
 
             if state.vms.isEmpty {
@@ -125,5 +129,29 @@ struct WebUISection: View {
         } catch {
             state.lastError = error.localizedDescription
         }
+    }
+}
+
+struct MemoryGauge: View {
+    let memory: HostMemory
+    let vmBytes: UInt64
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            HStack {
+                Text("Memory").font(.caption)
+                Spacer()
+                Text("\(gb(memory.used)) of \(gb(memory.total)) GB used · VMs \(gb(vmBytes)) GB")
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
+            ProgressView(value: Double(memory.used), total: Double(max(memory.total, 1)))
+                .tint(memory.pressure >= 4 ? .red : memory.pressure >= 2 ? .orange : .green)
+        }
+        .help("Pressure: \(memory.pressureLabel) · swap \(gb(memory.swapUsed)) GB")
+    }
+
+    private func gb(_ bytes: UInt64) -> String {
+        String(format: "%.1f", Double(bytes) / 1_073_741_824)
     }
 }

@@ -56,8 +56,10 @@ final class WebServer {
            FileManager.default.fileExists(atPath: bundled.appending(path: "index.html").path) {
             return bundled.path
         }
-        // Development: serve straight from the source tree.
-        return URL(fileURLWithPath: #filePath).deletingLastPathComponent().appending(path: "Assets").path
+        // Development: the React build in the source tree (`npm --prefix web run build`).
+        return URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .appending(path: "web/dist").path
     }
 
     nonisolated static func makeApplication(state: AppState, settings: WebSettings) throws -> some ApplicationProtocol {

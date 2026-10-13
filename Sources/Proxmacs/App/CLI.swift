@@ -19,6 +19,10 @@ enum CLI {
       list
       create <name> [--nat | --bridged <iface>] [--cpus N] [--memory MB] [--disk GB]
                     [--image <file.qcow2|raw>] [--password P] [--autostart] [--no-start]
+                    [--user U] [--ssh-keys FILE] [--ip CIDR [--gateway IP] [--dns IP,IP]]
+      edit <name>   hardware (VM stopped): [--cpus N] [--memory MB] [--disk GB] [--nat | --bridged <iface>]
+                    cloud-init (applied on next start): [--user U] [--password | --no-password]
+                    [--ssh-keys FILE] [--dhcp | --ip CIDR [--gateway IP] [--dns IP,IP]]
       start|stop|delete|backup <name>
       ip <name> [--wait SECONDS]
       backups <name>
@@ -75,6 +79,19 @@ enum CLI {
         func option(_ flag: String) -> String? {
             args.firstIndex(of: flag).flatMap { $0 + 1 < args.count ? args[$0 + 1] : nil }
         }
+        /// One OpenSSH public key per line; `-` reads stdin.
+        func sshKeys(_ path: String) throws -> [String] {
+            let text = path == "-" ? String(decoding: FileHandle.standardInput.readDataToEndOfFile(), as: UTF8.self)
+                : try String(contentsOfFile: (path as NSString).expandingTildeInPath, encoding: .utf8)
+            return text.split(whereSeparator: \.isNewline).map { $0.trimmingCharacters(in: .whitespaces) }
+                .filter { !$0.isEmpty && !$0.hasPrefix("#") }
+        }
+        func guestNetwork(_ base: GuestNetwork) -> GuestNetwork {
+            if args.contains("--dhcp") { return GuestNetwork() }
+            guard let address = option("--ip") else { return base }
+            return GuestNetwork(dhcp: false, address: address, gateway: option("--gateway"),
+                                dns: option("--dns")?.split(separator: ",").map(String.init) ?? [])
+        }
         func check() throws {
             if let error = state.lastError { throw ProxmacsError(error) }
         }
@@ -103,10 +120,46 @@ enum CLI {
                 image: option("--image").map { .local(URL(fileURLWithPath: $0)) } ?? .debian13,
                 password: option("--password") ?? "",
                 autostart: args.contains("--autostart"),
-                startNow: !args.contains("--no-start")
+                startNow: !args.contains("--no-start"),
+                user: option("--user") ?? "debian",
+                sshKeys: try option("--ssh-keys").map(sshKeys),
+                guestNetwork: guestNetwork(GuestNetwork())
             )
             try await state.create(request)
             print("created \(vm) (\(network.label))")
+
+        case "edit":
+            let vm = try name()
+            guard let meta = VMMeta.load(vm) else { throw ProxmacsError("No VM named \(vm)") }
+            let network: NetworkMode? = if args.contains("--nat") {
+                .nat
+            } else {
+                option("--bridged").map { .bridged(interface: $0) }
+            }
+            let hardware = HardwareChange(cpus: option("--cpus").flatMap(Int.init), memoryMB: option("--memory").flatMap(Int.init),
+                                          diskGB: option("--disk").flatMap(Int.init), network: network)
+            var edited = false
+            if hardware.cpus != nil || hardware.memoryMB != nil || hardware.diskGB != nil || hardware.network != nil {
+                try await state.editHardware(vm, hardware)
+                edited = true
+            }
+            let cloudFlags = ["--user", "--password", "--no-password", "--ssh-keys", "--dhcp", "--ip"]
+            if cloudFlags.contains(where: args.contains) {
+                let current = meta.effectiveCloudInit
+                var password = PasswordChange.keep
+                if args.contains("--no-password") {
+                    password = .remove
+                } else if args.contains("--password") {
+                    let first = prompt("New console password for \(option("--user") ?? current.user): ")
+                    guard first == prompt("Repeat: ") else { throw ProxmacsError("Passwords don't match") }
+                    password = .set(first)
+                }
+                try await state.editCloudInit(vm, user: option("--user") ?? current.user, password: password,
+                                              sshKeys: try option("--ssh-keys").map(sshKeys) ?? current.sshKeys,
+                                              network: guestNetwork(current.network))
+                edited = true
+            }
+            if !edited { throw ProxmacsError(usage) }
 
         case "start":
             await state.start(try name()); try check()

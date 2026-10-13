@@ -1,4 +1,4 @@
-/* Proxmacs web UI */
+/* Proxmacs web UI (React; see src/main.tsx) */
 
 :root {
   --bg: #eef0f3;
@@ -28,6 +28,10 @@
   --backdrop: rgba(20, 24, 32, 0.45);
   --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
   --radius: 6px;
+  --seg-app: #3b82f6;
+  --seg-wired: #f59e0b;
+  --seg-compressed: #a855f7;
+  --seg-cached: #94a3b8;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -57,6 +61,10 @@
     --input-bg: #16181c;
     --shadow: 0 8px 28px rgba(0, 0, 0, 0.5);
     --backdrop: rgba(0, 0, 0, 0.6);
+    --seg-app: #4a8bff;
+    --seg-wired: #f0a429;
+    --seg-compressed: #b77cff;
+    --seg-cached: #5d6876;
   }
 }
 
@@ -109,12 +117,14 @@ a { color: var(--accent); }
 }
 .icon-btn:hover { background: var(--hover); color: var(--text); }
 
-input[type=text], input[type=password], input[type=number], input[type=url], select {
+input[type=text], input[type=password], input[type=number], input[type=url], select, textarea {
   font: inherit; color: var(--text); background: var(--input-bg);
   border: 1px solid var(--border-strong); border-radius: var(--radius);
   height: 28px; padding: 0 8px; min-width: 0;
 }
-input:focus, select:focus { outline: 2px solid var(--accent); outline-offset: -1px; border-color: var(--accent); }
+textarea { height: auto; padding: 6px 8px; font-family: var(--mono); font-size: 12px; resize: vertical; width: 100%; }
+input:disabled, select:disabled, textarea:disabled { opacity: .6; }
+input:focus, select:focus, textarea:focus { outline: 2px solid var(--accent); outline-offset: -1px; border-color: var(--accent); }
 input[placeholder]:invalid:not(:placeholder-shown):not(:focus) { border-color: var(--err); }
 input[type=checkbox] { accent-color: var(--accent); width: 15px; height: 15px; margin: 0; }
 select.small { height: 24px; font-size: 12px; padding: 0 4px; }
@@ -133,6 +143,7 @@ fieldset { border: none; padding: 0; margin: 0; min-width: 0; }
 .segmented label { padding: 4px 14px; cursor: pointer; user-select: none; }
 .segmented label + label { border-left: 1px solid var(--border-strong); }
 .segmented input { position: absolute; opacity: 0; pointer-events: none; }
+.segmented label.disabled { opacity: .5; cursor: not-allowed; }
 .segmented label:has(input:checked) { background: var(--accent); color: var(--accent-text); }
 .segmented label:has(input:focus-visible) { outline: 2px solid var(--accent); outline-offset: -2px; }
 
@@ -275,7 +286,7 @@ fieldset { border: none; padding: 0; margin: 0; min-width: 0; }
 .kv > dt { color: var(--muted); }
 .kv > dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
 .copy-line { display: inline-flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.copy-line code { white-space: nowrap; background: var(--panel-alt); border: 1px solid var(--border); border-radius: 4px; padding: 2px 6px; }
+.copy-line code { overflow-wrap: anywhere; background: var(--panel-alt); border: 1px solid var(--border); border-radius: 4px; padding: 2px 6px; }
 .grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 0 16px; }
 
 /* tables */
@@ -327,6 +338,9 @@ fieldset { border: none; padding: 0; margin: 0; min-width: 0; }
 .task-status.error { color: var(--err); font-weight: 600; }
 
 /* modal */
+.modal.wide { width: 720px; }
+.section-title { font-size: 13px; margin: 20px 0 10px; padding-top: 14px; border-top: 1px solid var(--border); }
+.check-row { display: flex; gap: 24px; flex-wrap: wrap; margin-top: 16px; }
 .modal-backdrop { position: fixed; inset: 0; background: var(--backdrop); display: flex; align-items: center; justify-content: center; padding: 16px; z-index: 100; }
 .modal {
   width: 540px; max-width: 100%; max-height: calc(100vh - 32px); display: flex; flex-direction: column;
@@ -358,4 +372,67 @@ fieldset { border: none; padding: 0; margin: 0; min-width: 0; }
   .kv { grid-template-columns: minmax(0, 1fr); gap: 2px 0; }
   .kv > dd { margin-bottom: 8px; }
   .task-msg { display: none; }
+}
+
+/* ---------- Additions for the React UI ---------- */
+
+.spaced { margin-top: 10px; }
+.check.tall { height: 28px; }
+.check.inline { display: inline-flex; margin-left: 10px; font-size: 12px; color: var(--text); }
+input.narrow { width: 90px; }
+.label-row { display: flex; align-items: center; gap: 8px; font-weight: 500; }
+.note.warn { background: var(--warn-bg); }
+.btn.link, button.link { border: none; background: none; padding: 0; color: var(--accent); font: inherit; cursor: pointer; text-decoration: underline; }
+.recover-results { margin-top: 12px; }
+.copy-line.spaced { margin-top: 4px; }
+
+/* topbar memory indicator */
+.mem-indicator {
+  display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 10px;
+  border: 1px solid var(--border); border-radius: var(--radius); background: var(--panel-alt);
+  color: var(--muted); font: inherit; cursor: pointer; white-space: nowrap;
+}
+.mem-indicator:hover { background: var(--hover); }
+.mini-meter { display: inline-block; width: 48px; height: 6px; border-radius: 3px; background: var(--border); overflow: hidden; }
+.mini-meter > span { display: block; height: 100%; background: var(--ok); }
+.mem-indicator.warning .mini-meter > span { background: var(--warn); }
+.mem-indicator.critical .mini-meter > span { background: var(--err); }
+
+/* host memory panel */
+.mem-head { display: flex; align-items: flex-end; gap: 16px; margin-bottom: 10px; }
+.mem-big { font-size: 20px; font-weight: 600; }
+.mem-big .muted { font-size: 13px; font-weight: 400; }
+.mem-bar { position: relative; display: flex; height: 14px; border-radius: 4px; overflow: visible; background: var(--border); }
+.mem-bar > div:not(.vm-mark) { height: 100%; }
+.mem-bar > div:first-child { border-radius: 4px 0 0 4px; }
+.seg-app { background: var(--seg-app); }
+.seg-wired { background: var(--seg-wired); }
+.seg-compressed { background: var(--seg-compressed); }
+.seg-cached { background: var(--seg-cached); }
+.seg-free { background: var(--border); }
+.vm-mark { position: absolute; top: -4px; bottom: -4px; width: 0; border-left: 2px dashed var(--text); }
+.legend { display: flex; flex-wrap: wrap; gap: 6px 18px; margin-top: 10px; font-size: 12px; color: var(--muted); }
+.legend strong { color: var(--text); font-weight: 600; }
+.legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 6px; vertical-align: -1px; }
+.legend i.vm-swatch { border-left: 2px dashed var(--text); width: 2px; border-radius: 0; }
+.chart { margin: 14px 0 0; }
+.chart svg { display: block; width: 100%; height: 80px; background: var(--panel-alt); border: 1px solid var(--border); border-radius: 4px; }
+.chart .grid { stroke: var(--border); stroke-width: 1; vector-effect: non-scaling-stroke; }
+.chart .area { fill: var(--seg-app); opacity: .18; }
+.chart .line { fill: none; stroke: var(--seg-app); stroke-width: 1.5; vector-effect: non-scaling-stroke; }
+.chart .vms { fill: none; stroke: var(--text); stroke-width: 1; stroke-dasharray: 4 3; vector-effect: non-scaling-stroke; opacity: .7; }
+.chart figcaption { display: flex; justify-content: space-between; margin-top: 4px; }
+.chart .dash { letter-spacing: -1px; }
+.chart-empty { margin-top: 12px; }
+
+/* VM chips on the host summary */
+.vm-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 12px; }
+.chip {
+  display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 12px;
+  border: 1px solid var(--border); background: var(--panel-alt); color: var(--text); font: inherit; font-size: 12px; cursor: pointer;
+}
+.chip:hover { background: var(--hover); }
+
+@media (max-width: 760px) {
+  .mem-indicator > span:first-child { display: none; }
 }

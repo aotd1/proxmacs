@@ -24,8 +24,13 @@ enum VMRunner {
     private static let maxLogSize = 1 << 20
 
     static func run(_ vm: String) throws -> Never {
-        guard let meta = VMMeta.load(vm) else { throw ProxmacsError("No VM named \(vm)") }
+        guard var meta = VMMeta.load(vm) else { throw ProxmacsError("No VM named \(vm)") }
         guard let tart = Tart.locate() else { throw ProxmacsError("tart not found") }
+        if meta.seedPending {
+            // This boot picks up the rebuilt seed.
+            meta.seedPending = false
+            try? meta.save()
+        }
 
         // 1. Our own pty; raw mode on the VM side so nothing is echoed or translated.
         var master: Int32 = -1, slave: Int32 = -1

@@ -27,7 +27,7 @@ struct VMRowView: View {
                     if let ip = item.ip {
                         Button(ip) { state.copySSHCommand(item) }
                             .buttonStyle(.link)
-                            .help("Copy ssh debian@\(ip)")
+                            .help("Copy ssh \(item.meta.effectiveCloudInit.user)@\(ip)")
                     } else if item.isRunning {
                         Text("waiting for IP…")
                     }

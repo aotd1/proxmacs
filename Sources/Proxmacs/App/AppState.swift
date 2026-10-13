@@ -31,6 +31,28 @@ struct NewVMRequest {
     var password: String
     var autostart: Bool
     var startNow: Bool
+    var user = "debian"
+    /// nil = the host user's ~/.ssh/*.pub keys.
+    var sshKeys: [String]? = nil
+    var guestNetwork = GuestNetwork()
+
+    var cloudInit: CloudInitConfig {
+        CloudInitConfig(user: user, sshKeys: sshKeys ?? CloudInitSeed.sshPublicKeys(), network: guestNetwork)
+    }
+}
+
+/// Hardware edits; nil fields stay unchanged. Applied with `tart set`, so the VM must be stopped.
+struct HardwareChange {
+    var cpus: Int?
+    var memoryMB: Int?
+    var diskGB: Int?
+    var network: NetworkMode?
+}
+
+enum PasswordChange: Equatable {
+    case keep
+    case set(String)
+    case remove
 }
 
 struct ProxmacsError: LocalizedError {
@@ -62,6 +84,7 @@ final class AppState {
     private(set) var activity: [String: String] = [:]
     /// Newest first, capped.
     private(set) var tasks: [TaskRecord] = []
+    private(set) var memory: HostMemory?
     var status: String? {
         didSet { if let status { onStatus?(status) } }
     }
@@ -88,6 +111,7 @@ final class AppState {
     }
 
     func refresh() async {
+        memory = HostStats.memory()
         if tart == nil {
             tart = Tart.locate()
             tartVersion = await tart?.version()
@@ -140,6 +164,20 @@ final class AppState {
 
         func progress(_ fraction: Double) { update(fraction, nil) }
         func message(_ text: String) { update(nil, text) }
+    }
+
+    /// Like `perform`, but rethrows the task's error to the caller.
+    func performThrowing(_ vm: String?, _ title: String, taskID: String? = nil, _ work: (TaskHandle) async throws -> String?) async throws {
+        var failure: Error?
+        await perform(vm, title, taskID: taskID) { task in
+            do {
+                return try await work(task)
+            } catch {
+                failure = error
+                throw error
+            }
+        }
+        if let failure { throw failure }
     }
 
     /// Runs `work` as a recorded task. Returns false (and records the error) on failure.
@@ -206,17 +244,11 @@ final class AppState {
     func create(_ request: NewVMRequest, taskID: String? = nil) async throws {
         let name = request.name
         try validateNewVM(name)
-        var failure: Error?
-        await perform(name, "Create VM", taskID: taskID) { task in
-            do {
-                try await self.createVM(request, task: task)
-                return "Created \(name)"
-            } catch {
-                failure = error
-                throw error
-            }
+        try request.cloudInit.validate()
+        try await performThrowing(name, "Create VM", taskID: taskID) { task in
+            try await self.createVM(request, task: task)
+            return "Created \(name)"
         }
-        if let failure { throw failure }
     }
 
     private func createVM(_ request: NewVMRequest, task: TaskHandle) async throws {
@@ -236,10 +268,16 @@ final class AppState {
             try await tart.set(name, cpu: request.cpus, memoryMB: request.memoryMB, disk: base)
             try await tart.set(name, diskSizeGB: request.diskGB)
 
-            let meta = VMMeta(name: name, network: request.network, autostart: request.autostart)
+            var config = request.cloudInit
+            if !request.password.isEmpty {
+                let password = request.password
+                config.passwordHash = await Task.detached { SHA512Crypt.hash(password) }.value
+            }
+            var meta = VMMeta(name: name, network: request.network, autostart: request.autostart)
+            meta.cloudInit = config
             try meta.save()
             task.message("Building cloud-init seed…")
-            try await CloudInitSeed.build(name: name, password: request.password, agentDeb: agent)
+            try await CloudInitSeed.build(name: name, config: config, agentDeb: agent)
             try LaunchAgent.write(tart: tart, meta: meta)
         } catch {
             // Roll back so a half-created VM doesn't linger.
@@ -285,6 +323,76 @@ final class AppState {
             try FileManager.default.removeItem(at: Paths.vmDir(vm))
             ips[vm] = nil
             return "Deleted \(vm); backups kept"
+        }
+    }
+
+    // MARK: - Editing
+
+    func editHardware(_ vm: String, _ change: HardwareChange, taskID: String? = nil) async throws {
+        guard let current = item(vm), let meta = VMMeta.load(vm) else { throw ProxmacsError("No VM named \(vm)") }
+        let networkChanged = change.network.map { $0 != meta.network } ?? false
+        let cpus = change.cpus.flatMap { $0 == current.cpus ? nil : $0 }
+        let memoryMB = change.memoryMB.flatMap { $0 == current.memoryMB ? nil : $0 }
+        let diskGB = change.diskGB.flatMap { $0 == current.diskGB ? nil : $0 }
+        guard cpus != nil || memoryMB != nil || diskGB != nil || networkChanged else { return }
+
+        guard current.state == "stopped" else { throw ProxmacsError("Shut down \(vm) before changing its hardware") }
+        let hostCPUs = ProcessInfo.processInfo.activeProcessorCount
+        if let cpus, !(1...hostCPUs).contains(cpus) { throw ProxmacsError("CPUs must be between 1 and \(hostCPUs)") }
+        let hostMB = Int(ProcessInfo.processInfo.physicalMemory / 1024 / 1024)
+        if let memoryMB, !(512...hostMB).contains(memoryMB) { throw ProxmacsError("Memory must be between 512 MB and \(hostMB) MB") }
+        if let diskGB, let size = current.diskGB, diskGB < size {
+            throw ProxmacsError("Disks can only grow (\(vm) has \(size) GB)")
+        }
+        if let diskGB, diskGB > 16_384 { throw ProxmacsError("Disk size too large") }
+
+        try await performThrowing(vm, "Edit hardware", taskID: taskID) { _ in
+            let tart = try requireTart()
+            if cpus != nil || memoryMB != nil || diskGB != nil {
+                try await tart.set(vm, cpu: cpus, memoryMB: memoryMB, diskSizeGB: diskGB)
+            }
+            if networkChanged, let network = change.network {
+                try updateMeta(vm) { $0.network = network }
+            }
+            var changes: [String] = []
+            if let cpus { changes.append("\(cpus) CPUs") }
+            if let memoryMB { changes.append("\(memoryMB) MB memory") }
+            if let diskGB { changes.append("\(diskGB) GB disk (the root filesystem grows on next boot)") }
+            if networkChanged, let network = change.network { changes.append(network.label) }
+            return "\(vm): " + changes.joined(separator: ", ")
+        }
+    }
+
+    /// Stores new cloud-init settings and rebuilds the seed; cloud-init applies them on the next start.
+    func editCloudInit(_ vm: String, user: String, password: PasswordChange, sshKeys: [String], network: GuestNetwork,
+                       taskID: String? = nil) async throws {
+        guard let meta = VMMeta.load(vm) else { throw ProxmacsError("No VM named \(vm)") }
+        var config = meta.effectiveCloudInit
+        config.user = user
+        config.sshKeys = sshKeys
+        config.network = network
+        switch password {
+        case .keep:
+            break
+        case .set(let plain):
+            guard !plain.isEmpty else { throw ProxmacsError("Password is empty") }
+            config.passwordHash = await Task.detached { SHA512Crypt.hash(plain) }.value
+            config.managePassword = true
+        case .remove:
+            config.passwordHash = nil
+            config.managePassword = true
+        }
+        try config.validate()
+
+        try await performThrowing(vm, "Edit cloud-init", taskID: taskID) { task in
+            let agent = try await ImageStore.agentPackage { task.message($0) }
+            try await CloudInitSeed.build(name: vm, config: config, agentDeb: agent)
+            let running = item(vm)?.isRunning ?? false
+            try updateMeta(vm) {
+                $0.cloudInit = config
+                $0.seedPending = running
+            }
+            return running ? "Cloud-init updated: shut down and start \(vm) to apply" : "Cloud-init updated: applied when \(vm) next starts"
         }
     }
 
@@ -482,8 +590,9 @@ final class AppState {
     func copySSHCommand(_ item: VMItem) {
         guard let ip = item.ip else { return }
         NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString("ssh debian@\(ip)", forType: .string)
-        status = "Copied: ssh debian@\(ip)"
+        let command = "ssh \(item.meta.effectiveCloudInit.user)@\(ip)"
+        NSPasteboard.general.setString(command, forType: .string)
+        status = "Copied: \(command)"
     }
 }
 
