@@ -49,18 +49,50 @@ A preceding handshake-only control did not reproduce the crash. It must not be t
 to an activated graphical session. An earlier raw-only-encoding experiment caused a different Apple
 assertion (`receive_client_message_set_encodings`) and is not evidence for this reconnect mechanism.
 
-## Impact and remediation boundary
+## Implemented workaround and failure behavior
 
-Retaining noVNC instances across navigation avoids this transition during tab/VM switches. It does not
-survive page reload, closing the browser, loss of connectivity, or restarting the panel. The experimental
-console therefore remains unsafe to rely on for guest availability on this host build.
+Retaining noVNC instances across navigation reduces reconnects within a page. Reload, closing the browser,
+loss of connectivity and restarting the panel still close browser connections, so frontend retention alone
+cannot prevent the zero-client transition.
 
-The direct test validates a candidate workaround: maintain a supervised graphical VNC client for the
-entire Tart process lifetime, independent of browsers and the panel, so browser reconnects never return
-from zero clients. A production implementation must establish it before exposing console credentials,
-consume server traffic, and withdraw console availability if it fails. It must not blindly reconnect the
-anchor after the client count may have reached zero or automatically sacrifice the VM to recover a console.
-This workaround has **not** been deployed. The temporary diagnostic client was removed.
+`console-runner.py` now establishes a passive, shared RFB 3.8 graphical connection before publishing the
+per-boot console endpoint. It uses macOS CommonCrypto for VNC authentication (no secrets in subprocess argv),
+negotiates standard display encodings, requests a single 1×1 update, then continuously drains/discards server
+traffic in bounded chunks. It does not request a continuous video stream, store images, or send guest input.
+No clipboard, Fence or continuous-update extensions are negotiated. A worker thread and a bounded startup
+deadline keep the independent PF checks running during connection setup.
+
+The persistent client belongs to the supervisor/Tart lifetime, independently of the panel and browsers.
+If authentication, display initialization or the established connection fails, the endpoint is withdrawn.
+No new console session is published; existing panel bridges observe endpoint removal within two seconds.
+There is no anchor retry and no VM restart. The VM remains available through SSH/guest services, and an
+operator can schedule a clean restart to recover the console. PF protection loss retains its separate
+fail-closed behavior: kill Tart, remove credentials and pause its system launcher.
+
+Publication and withdrawal share a lock to prevent a failed anchor being republished. This is not an atomic
+transaction with Apple's server: a connection already in flight when the anchor fails can still overlap
+with the zero-client transition. This workaround protects ordinary browser reloads while its connection
+is healthy; it is not a general repair of Apple's private VNC implementation.
+
+## Validation
+
+- Isolated RFB fixture completes authentication and a framebuffer update before the endpoint is exposed.
+- Dropping only the persistent socket removes the endpoint, denies new console sessions, and closes an
+  existing WebSocket bridge. The mock VM and supervisor remain alive, with no pause marker, reconnect or input.
+- Unit tests cover protocol rejection, bounded initialization, publication ordering, anchor withdrawal,
+  unchanged PF failure handling, and supervisor upgrade hash checks/rollback on metadata write failure.
+- Production negotiation was first tested directly on a fresh guest: the same standard encoding list and
+  1×1 request accepted by Apple VNC, followed by ten full-display clients closed with TCP resets. The Tart
+  PID stayed unchanged; the temporary test connection was then removed with a clean guest restart.
+- The production supervisor was installed on both guests on 2026-10-14 and activated with clean restarts.
+  Each guest completed **60 full graphical RFB connections through the authenticated HTTPS/WebSocket bridge**
+  (two simultaneous clients, 15 cycles before and 15 after restarting the Proxmacs panel). Both Tart PIDs
+  remained unchanged. These are reload-equivalent protocol tests, not an automated browser-page reload.
+- The panel restart did not restart the supervisors or guests. Guest SSH, CI runner, friend Internet access
+  and fresh PF health were checked. No new Tart crash reports appeared; the latest remained the controlled
+  reproduction at 18:41:07.
+- Web and headless release Swift builds passed; 5 supervisor tests, 17 PF/upgrade tests, 9 input tests and
+  the isolated HTTP/WebSocket integration passed. `swift test` remains blocked by missing XCTest in the
+  host Command Line Tools. Long-duration operation, host reboot and Recovery remain unverified.
 
 An Apple fix or a different display backend would remove this dependency; neither has been validated here.
-Do not present the frontend navigation change as a fix for reload stability.

@@ -153,12 +153,15 @@ class PolicyTests(unittest.TestCase):
                 child = real_popen([sys.executable, '-u', '-c', 'import time; print("VNC server is running at vnc://:fixture-secret@127.0.0.1:54321"); time.sleep(60)'], **kwargs)
                 processes.append(child)
                 return child
+            def anchor(record, directory, reader):
+                return types.SimpleNamespace(start=lambda: None, close=lambda: None, status='ready',
+                                             expose=lambda: publish(directory, reader, record) or True)
             args = ['runner', '--reader', pwd.getpwuid(os.getuid()).pw_name, '--state-dir', str(state), '--pause-file', str(paused),
                     '--firewall-status', '/protected/ready.json', '--', '/example/tart', 'run', 'test']
             output = io.StringIO()
             old_signals = {sig: signal.getsignal(sig) for sig in [signal.SIGINT, signal.SIGTERM]}
             try:
-                with mock.patch.object(sys, 'argv', args), mock.patch.object(runner, 'firewall_ready', side_effect=lambda *args: not published), mock.patch.object(runner.subprocess, 'Popen', side_effect=spawn), mock.patch.object(runner.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, 'n*:54321\n', '')), mock.patch.object(runner, 'publish', side_effect=publish), contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
+                with mock.patch.object(sys, 'argv', args), mock.patch.object(runner, 'firewall_ready', side_effect=lambda *args: not published), mock.patch.object(runner.subprocess, 'Popen', side_effect=spawn), mock.patch.object(runner.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, 'n*:54321\n', '')), mock.patch.object(runner, 'DisplayAnchor', side_effect=anchor), contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
                     self.assertEqual(runner.main(), 1)
                 self.assertTrue(published)
                 self.assertTrue(paused.exists())
@@ -198,6 +201,31 @@ class PolicyTests(unittest.TestCase):
         with mock.patch.object(installer.subprocess, 'run', return_value=subprocess.CompletedProcess([], 255, '', 'unreachable')):
             with self.assertRaises(RuntimeError):
                 installer.probe_remote(config, '192.0.2.1', 12345, False)
+
+    def test_runner_upgrade_preserves_pf_and_rejects_changed_installation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            installed = root/'installed'; installed.mkdir()
+            target = installed/'console-runner.py'; target.write_text('old supervisor')
+            source = root/'console-runner.py'; source.write_text('print("new supervisor")\n')
+            config = {'installed_hashes': {str(target): installer.digest(target)}}
+            def write(path, data, mode): path.write_bytes(data)
+            with mock.patch.object(installer, 'HERE', root), mock.patch.object(installer, 'write_root', side_effect=write), mock.patch.object(installer.policy, 'BASE', root), mock.patch.object(installer.policy, 'trusted'), mock.patch.object(installer.policy, 'check'), mock.patch.object(installer.policy, 'atomic_json') as save, contextlib.redirect_stdout(io.StringIO()):
+                installer.update_runner(config)
+                self.assertEqual(target.read_bytes(), source.read_bytes())
+                self.assertEqual(save.call_args.args[1]['installed_hashes'][str(target)], installer.digest(target))
+                self.assertEqual(next(root.glob('*.before-update-*')).read_text(), 'old supervisor')
+                with self.assertRaises(RuntimeError): installer.update_runner(config)
+                self.assertEqual(save.call_count, 1)
+
+    def test_runner_upgrade_restores_file_if_config_write_fails(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            target = root/'console-runner.py'; target.write_text('original')
+            config = {'installed_hashes': {str(target): installer.digest(target)}}
+            with mock.patch.object(installer, 'HERE', HERE), mock.patch.object(installer, 'write_root', side_effect=lambda path, data, mode: path.write_bytes(data)), mock.patch.object(installer.policy, 'BASE', root), mock.patch.object(installer.policy, 'trusted'), mock.patch.object(installer.policy, 'check'), mock.patch.object(installer.policy, 'atomic_json', side_effect=OSError):
+                with self.assertRaises(OSError): installer.update_runner(config)
+                self.assertEqual(target.read_text(), 'original')
 
 
 if __name__ == '__main__':

@@ -12,6 +12,7 @@ import socket
 import struct
 import subprocess
 import threading
+import time
 
 ROOT = pathlib.Path(os.environ['PROXMACS_CONSOLE_FIXTURE'])
 PASSWORD = 'console-fixture-password'
@@ -26,10 +27,19 @@ def recv(sock, count):
     return data
 
 
-def client(sock):
+def client(sock, first):
     with (ROOT/'events.jsonl').open('a') as stream:
         stream.write(json.dumps(dict(type='connect'))+'\n')
     try:
+        if first:
+            def drop_on_request():
+                while not (ROOT/'drop-anchor').exists():
+                    time.sleep(0.05)
+                try:
+                    sock.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
+            threading.Thread(target=drop_on_request, daemon=True).start()
         sock.sendall(b'RFB 003.008\n')
         recv(sock, 12)
         sock.sendall(b'\x01\x02')
@@ -91,6 +101,8 @@ with (ROOT/'config.json').open('r+') as lock:
     listener.bind(('127.0.0.1', 0))
     listener.listen()
     print(f'VNC server is running at vnc://:{PASSWORD}@127.0.0.1:{listener.getsockname()[1]}', flush=True)
+    first = True
     while True:
         connection, _ = listener.accept()
-        threading.Thread(target=client, args=(connection,), daemon=True).start()
+        threading.Thread(target=client, args=(connection, first), daemon=True).start()
+        first = False

@@ -77,7 +77,7 @@ def main():
         subprocess.run([str(args.binary), 'cli', 'web-passwd', '--stdin'], input=PASSWORD+'\n', text=True, capture_output=True, check=True, env=env)
         with (root/'runner.log').open('w') as log:
             children.append(subprocess.Popen([os.sys.executable, str(HERE/'console-runner.py'), '--reader', __import__('pwd').getpwuid(os.getuid()).pw_name,
-                                             '--state-dir', str(record.parent), '--', str(HERE/'mock-console-vnc.py'), 'run', 'console-test'], env=env, stdout=log, stderr=log, start_new_session=True))
+                                             '--state-dir', str(record.parent), '--pause-file', str(vm/'.paused'), '--', str(HERE/'mock-console-vnc.py'), 'run', 'console-test'], env=env, stdout=log, stderr=log, start_new_session=True))
         with (root/'server.log').open('w') as log:
             children.append(subprocess.Popen([str(args.binary), 'cli', 'serve'], env=env, stdout=log, stderr=log, start_new_session=True))
         jar = http.cookiejar.CookieJar()
@@ -125,12 +125,32 @@ def main():
             record.chmod(0o644)
             assert request(path,{})[0] == 400
             record.chmod(0o600)
+            # The first, fully authenticated client belongs to the supervisor. Kill
+            # only that socket while a browser bridge is open; keep the mock VM alive.
+            cookie='; '.join(c.name+'='+c.value for c in jar)
+            ws=WebSocket(port,cookie,base)
+            assert ws.status == 101 and ws.frame()[1] == b'RFB 003.008\n'
+            (vm/'drop-anchor').touch()
+            for _ in range(50):
+                if not record.exists(): break
+                time.sleep(0.1)
+            assert not record.exists()
+            assert request(path,{})[0] == 400
+            assert ws.frame()[0] == 8  # Existing bridge also observes withdrawal.
+            ws.close()
+            time.sleep(2)
+            assert children[0].poll() is None and not (vm/'.paused').exists()
+            os.kill(json.loads(original)['pid'], 0)
+            events=[json.loads(line) for line in (vm/'events.jsonl').read_text().splitlines()]
+            assert sum(e['type'] == 'connect' for e in events) == 3, events  # anchor + two authorized bridges; no retry
+            assert not any(e['type'] in ('key', 'pointer') for e in events)
             children[0].terminate();children[0].wait(timeout=8)
             assert not record.exists()
             assert request(path,{})[0] == 400
             log=(root/'runner.log').read_text()
             assert 'console-fixture-password' not in log and 'vnc://' not in log
-            print('PASS: authenticated session, Origin checks, binary bridge, logout disconnect, stale PID, file permissions, credential cleanup and log redaction')
+            assert 'persistent display disconnected; VM kept running' in log
+            print('PASS: authenticated session, Origin checks, binary bridge, logout disconnect, stale PID, permissions, anchor loss withdraws console without VM termination/retry/input, cleanup and log redaction')
         finally:
             for child in reversed(children):
                 if child.poll() is None:

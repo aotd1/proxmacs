@@ -4,6 +4,7 @@
 Run as the VM owner, not root. The original launcher still owns network and keychain setup.
 """
 import argparse
+import ctypes
 import json
 import os
 import pathlib
@@ -12,7 +13,10 @@ import pwd
 import re
 import select
 import signal
+import socket
 import stat
+import struct
+import threading
 import time
 import subprocess
 import sys
@@ -90,6 +94,128 @@ def publish(directory, reader, record):
         pathlib.Path(filename).unlink(missing_ok=True)
 
 
+def vnc_response(password, challenge):
+    """VNC's bit-reversed DES key, using macOS CommonCrypto without secret argv."""
+    key = bytes(int(f'{byte:08b}'[::-1], 2) for byte in password.encode()[:8].ljust(8, b'\0'))
+    crypt = ctypes.CDLL('/usr/lib/libSystem.B.dylib').CCCrypt
+    crypt.argtypes = [ctypes.c_uint32, ctypes.c_uint32, ctypes.c_uint32, ctypes.c_void_p,
+                      ctypes.c_size_t, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t,
+                      ctypes.c_void_p, ctypes.c_size_t, ctypes.POINTER(ctypes.c_size_t)]
+    crypt.restype = ctypes.c_int32
+    output = ctypes.create_string_buffer(32)
+    written = ctypes.c_size_t()
+    if len(challenge) != 16 or crypt(0, 1, 2, key, 8, None, challenge, 16, output, 32, ctypes.byref(written)) != 0 or written.value != 16:
+        raise ValueError('VNC authentication unavailable')
+    return output.raw[:16]
+
+
+def initialize_display(sock, password, timeout=15):
+    """Activate a shared, passive RFB 3.8 display; do not send guest input."""
+    deadline = time.monotonic() + timeout
+
+    def read(count):
+        data = bytearray()
+        while len(data) < count:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError('VNC initialization timed out')
+            sock.settimeout(remaining)
+            chunk = sock.recv(count - len(data))
+            if not chunk:
+                raise EOFError('VNC connection closed')
+            data.extend(chunk)
+        return bytes(data)
+
+    if read(12) != b'RFB 003.008\n':
+        raise ValueError('Unsupported VNC protocol')
+    sock.sendall(b'RFB 003.008\n')
+    if 2 not in read(read(1)[0]):
+        raise ValueError('VNC password authentication required')
+    sock.sendall(b'\x02')
+    sock.sendall(vnc_response(password, read(16)))
+    if read(4) != bytes(4):
+        raise ValueError('VNC authentication failed')
+    sock.sendall(b'\x01')  # Shared: never evict a browser's console.
+    header = read(24)
+    width, height = struct.unpack('!HH', header[:4])
+    name_size = struct.unpack('!I', header[20:24])[0]
+    if not width or not height or name_size > 65536:
+        raise ValueError('Invalid VNC display')
+    read(name_size)
+    sock.sendall(bytes(4) + struct.pack('!BBBBHHHBBBxxx', 32, 24, 0, 1, 255, 255, 255, 0, 8, 16))
+    # Standard noVNC display encodings only. Do not negotiate clipboard, Fence or
+    # continuous-update extensions: this sink neither renders nor requests a stream.
+    encodings = [1, 7, 16, 5, 2, 6, 0, -26, -254, -223, -224, -239]
+    sock.sendall(struct.pack('!BBH', 2, 0, len(encodings)) +
+                 b''.join(struct.pack('!i', value) for value in encodings))
+    sock.sendall(struct.pack('!BBHHHH', 3, 0, 0, 0, 1, 1))
+    if read(1) != b'\x00':
+        raise ValueError('Expected initial framebuffer update')
+    read(3)
+    # The display is active. The worker drains the remaining response in bounded
+    # chunks, then stays idle; no screenshots or guest clipboard data are retained.
+    sock.settimeout(1)
+
+
+class DisplayAnchor:
+    """One attempt per Tart boot. Losing the last client must never trigger a retry."""
+    def __init__(self, record, directory, reader):
+        self.record, self.directory, self.reader = record, directory, reader
+        self.lock = threading.Lock()
+        self.stopping = threading.Event()
+        self.status = 'starting'
+        self.published = False
+        self.sock = None
+        self.thread = threading.Thread(target=self.run, name='vnc-display-anchor', daemon=True)
+
+    def start(self):
+        self.thread.start()
+
+    def run(self):
+        try:
+            with socket.create_connection(('127.0.0.1', self.record['port']), timeout=5) as sock:
+                with self.lock:
+                    self.sock = sock
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+                initialize_display(sock, self.record['password'])
+                with self.lock:
+                    if not self.stopping.is_set():
+                        self.status = 'ready'
+                while not self.stopping.is_set():
+                    try:
+                        if not sock.recv(65536):
+                            raise EOFError('VNC anchor disconnected')
+                    except socket.timeout:
+                        continue  # An idle display is healthy; never reconnect it.
+        except Exception:
+            pass  # Never log protocol bytes, credentials or exception payloads.
+        finally:
+            with self.lock:
+                self.sock = None
+                self.status = 'stopped' if self.stopping.is_set() else 'failed'
+                (self.directory / 'session.json').unlink(missing_ok=True)
+
+    def expose(self):
+        # Serialize publication and withdrawal so a dead anchor cannot be republished.
+        with self.lock:
+            if self.status == 'ready' and not self.published and not self.stopping.is_set():
+                publish(self.directory, self.reader, self.record)
+                self.published = True
+                return True
+        return False
+
+    def close(self):
+        self.stopping.set()
+        with self.lock:
+            (self.directory / 'session.json').unlink(missing_ok=True)
+            if self.sock:
+                try:
+                    self.sock.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
+        self.thread.join(timeout=1)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--state-dir', type=pathlib.Path, required=True)
@@ -134,16 +260,30 @@ def main():
     master, slave = pty.openpty()
     child = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=slave, stderr=slave, start_new_session=True)
     os.close(slave)
+    stopping = threading.Event()
+    def forward_signal(signum, frame):
+        stopping.set()
+        state.unlink(missing_ok=True)
+        if child.poll() is None:
+            child.send_signal(signum)
     for sig in (signal.SIGINT, signal.SIGTERM):
-        signal.signal(sig, lambda signum, frame: child.send_signal(signum) if child.poll() is None else None)
+        signal.signal(sig, forward_signal)
     buffer = b''
     unsafe = False
     protection_lost = False
+    anchor = None
+    anchor_reported = False
     try:
         while True:
             if args.firewall_status and not firewall_ready(args.firewall_status):
                 protection_lost = True
                 raise RuntimeError('PF protection lost')
+            if anchor and not stopping.is_set() and child.poll() is None:
+                if anchor.expose():
+                    print('proxmacs: graphical console ready; persistent display connected (credentials redacted)', flush=True)
+                if anchor.status == 'failed' and not anchor_reported:
+                    anchor_reported = True
+                    print('proxmacs: console unavailable; persistent display disconnected; VM kept running; console recovery requires a planned VM restart', flush=True)
             readable, _, _ = select.select([master], [], [], 0.5)
             if not readable:
                 if child.poll() is not None:
@@ -161,14 +301,16 @@ def main():
                 line = raw.decode('utf-8', errors='replace').rstrip('\r')
                 record = endpoint(line, child.pid)
                 if record:
+                    if anchor or stopping.is_set():
+                        continue  # A repeated banner must not reconnect a failed anchor.
                     listeners = subprocess.run(['/usr/sbin/lsof', '-nP', '-a', '-p', str(child.pid), '-iTCP', '-sTCP:LISTEN', '-Fn'], capture_output=True, text=True, check=True, timeout=5)
                     protected = firewall_ready(args.firewall_status) if args.firewall_status else loopback_only(listeners.stdout, record['port'])
                     if not listener_present(listeners.stdout, record['port']) or not protected:
                         # Wildcard sockets require the continuously monitored root PF policy.
                         unsafe = True
                         raise RuntimeError('Console listener is not restricted to loopback')
-                    publish(directory, args.reader, record)
-                    print('proxmacs: graphical console ready (credentials redacted)', flush=True)
+                    anchor = DisplayAnchor(record, directory, args.reader)
+                    anchor.start()
                 elif 'vnc://' not in line.lower():
                     print(line, flush=True)
             if len(buffer) > 65536:
@@ -195,6 +337,8 @@ def main():
         return 1
     finally:
         state.unlink(missing_ok=True)
+        if anchor:
+            anchor.close()
         os.close(master)
 
 

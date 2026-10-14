@@ -151,6 +151,35 @@ def rollback(config):
     print('Rolled back launcher and removed only the console PF rules/reference. No VM restarted.')
 
 
+def update_runner(config):
+    """Replace only the supervisor, preserving PF and the original rollback chain."""
+    if config.get('rolled_back'):
+        raise RuntimeError('PF installation was rolled back')
+    candidates = [pathlib.Path(p) for p in config['installed_hashes'] if pathlib.Path(p).name == 'console-runner.py']
+    if len(candidates) != 1:
+        raise RuntimeError('Cannot identify installed console supervisor')
+    for name, expected in config['installed_hashes'].items():
+        policy.trusted(name)
+        if digest(name) != expected:
+            raise RuntimeError('Installed launcher/supervisor changed; inspect before upgrade')
+    policy.check(config)
+    target = candidates[0]
+    replacement = (HERE / 'console-runner.py').read_bytes()
+    compile(replacement, str(target), 'exec')
+    original = target.read_bytes()
+    backup = policy.BASE / ('console-runner.py.before-update-' + str(time.time_ns()))
+    write_root(backup, original, 0o700)
+    updated = dict(config, installed_hashes=dict(config['installed_hashes']))
+    updated['installed_hashes'][str(target)] = hashlib.sha256(replacement).hexdigest()
+    try:
+        write_root(target, replacement, 0o755)
+        policy.atomic_json(policy.CONFIG, updated)
+    except BaseException:
+        write_root(target, original, 0o755)
+        raise
+    print('Console supervisor updated; PF and running VMs unchanged. Restart each VM cleanly to activate.')
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--launcher', type=pathlib.Path)
@@ -164,13 +193,16 @@ def main():
     actions.add_argument('--check', action='store_true')
     actions.add_argument('--verify', action='store_true')
     actions.add_argument('--rollback', action='store_true')
+    actions.add_argument('--update-runner', action='store_true')
     args = parser.parse_args()
-    if args.rollback or args.verify:
+    if args.rollback or args.verify or args.update_runner:
         if os.geteuid() != 0:
             parser.error('This operation needs sudo')
         config = policy.configuration()
         if args.rollback:
             rollback(config)
+        elif args.update_runner:
+            update_runner(config)
         else:
             policy.check(config); verify_network(config)
         return

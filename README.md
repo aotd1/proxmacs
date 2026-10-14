@@ -313,9 +313,10 @@ The macOS Console tab embeds [noVNC](https://novnc.com/): keyboard and mouse con
 with a compact toolbar, view-only mode, fit/actual-size scaling, fullscreen and reconnect controls.
 Visited graphical consoles stay connected when navigating between VMs or other tabs. Hidden consoles
 are inert and view-only; leaving one cancels clipboard typing, clears the draft and releases held keys.
-Logging out or closing/reloading the page still closes these connections. This avoids navigation-driven
-reconnects but is not a fix for Apple's experimental VNC crashes; refresh, Reconnect and multiple browser
-windows can still reach that server bug.
+Logging out or closing/reloading the page still closes these browser connections. The VM supervisor now
+keeps its own passive graphical connection alive independently of the browser and panel to avoid the
+confirmed Apple VNC last-client reconnect assertion. Existing installations need a supervisor upgrade
+and a clean VM restart to activate this protection; replacing web assets alone is insufficient.
 Type clipboard reads text on the browser device after a click, then previews it hidden by default.
 If clipboard access is denied, paste manually with Command-V (Mac) or Control-V. Select the destination
 field in the guest first. The confirmed text is sent as individual key events; Enter is never appended.
@@ -333,8 +334,14 @@ reports that the dedicated VM owner's inbound sockets are protected. Never simpl
 
 `scripts/console-runner.py` runs as the VM owner, captures the VNC URL before it reaches logs, and publishes a
 per-boot endpoint with mode 0600 and an ACL granting the panel account read access. The socket must be loopback-only
-or covered by the explicitly configured PF monitor. Credentials are removed when Tart exits. A supervisor failure
-pauses the system launcher and terminates that VM process; test on a guest that can be safely stopped first.
+or covered by the explicitly configured PF monitor. Before publishing credentials, the supervisor activates
+a shared RFB display and keeps that connection for the Tart process lifetime. It requests one small framebuffer
+update, drains incoming traffic without retaining it, and sends no keyboard, pointer or clipboard input.
+Initialization runs separately so PF checks continue during a slow handshake. If this connection fails,
+credentials are withdrawn and existing browser bridges close within two seconds; the VM keeps running.
+There is no automatic reconnect or VM restart: restoring the console requires a planned clean VM restart.
+Credentials are also removed when Tart exits. Other fatal supervisor errors still pause the system launcher
+and terminate that VM; loss of PF protection still kills it immediately. Test upgrades on a disposable guest.
 
 For an existing root-owned Bash launcher that sets `TART_HOME` and uses `exec "$TART_BIN" run ...`, the installer
 preserves its network flags, keychain setup and pause handling. Review the launcher, then run:
@@ -418,8 +425,23 @@ can terminate the guest on a new graphical VNC connection after the last client 
 VNC server registers the same accessor observer again and hits `Base::assertion_trap`. A direct RFB
 reproduction, with a ten-second gap and no Proxmacs/browser involved, produced the same SIGTRAP.
 Keeping one graphical client connected allowed five additional connect/disconnect cycles without a crash.
-The navigation workaround does not protect page reload or panel/browser restart. A supervised persistent
-client is a tested candidate, **not deployed**; see [evidence and limits](docs/vnc-reconnect-crash.md).
+The deployed supervisor subsequently passed 60 full graphical connections per guest through the panel's
+HTTPS/WebSocket bridge, including a panel restart, with unchanged Tart PIDs. These were protocol-level
+reload equivalents; an actual browser reload was not automated in that check.
+The supervisor now owns this persistent connection. This avoids the known zero-client transition while
+the anchor is healthy; it does not fix Apple's private framework or promise protection against other VNC
+bugs. See [evidence and limits](docs/vnc-reconnect-crash.md).
+
+For an existing PF installation, upgrade the supervisor without restarting PF or changing its rules:
+
+```bash
+sudo /usr/bin/python3 -I scripts/install-console-pf.py --update-runner
+```
+
+This checks the installed launcher/supervisor hashes, saves a root-owned backup, and updates the rollback
+metadata. Running supervisors keep the old code. Cleanly shut down and start each VM through its existing
+service controller, then verify the `persistent display connected` log before testing browser reconnects.
+Do not replace the process underneath an already-running Tart instance or remove the PF rules.
 Do not use raw VNC probes as health checks. The installer probes disposable TCP servers, not Apple VNC.
 
 
@@ -445,6 +467,8 @@ PYTHONDONTWRITEBYTECODE=1 python3 scripts/test-console-integration.py --binary /
 
 The integration check creates and removes isolated storage and a loopback RFB fixture; no real VM is used.
 It checks login/Origin restrictions, WebSocket data flow, logout, stale endpoints, permissions and secret redaction.
+It also disconnects the supervisor anchor and verifies endpoint withdrawal, existing bridge closure, continued
+VM-process liveness, no pause marker, no retry and no guest input.
 The fixture also supports VNC password authentication and a colored framebuffer for manual noVNC/input checks.
 Full Swift tests need an Xcode installation with XCTest; some Command Line Tools distributions cannot run them.
 `PROXMACS_HEADLESS=1` excludes the native SwiftUI menu when its macros are unavailable; CLI and web UI remain usable.
