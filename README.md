@@ -413,16 +413,14 @@ Rollback checks for later launcher edits, restores the saved launcher/supervisor
 only its own anchor and PF reference. It does not flush other rules/states or globally disable PF. Backups remain.
 The PF network tests require root and a real remote peer; unit tests below do not substitute for them.
 
-This remains an experimental Apple display server. During a real deployment on Tart 2.40.1 / macOS 27.2 beta
-(26B5091g), a raw TCP/RFB diagnostic connection coincided with a Tart SIGTRAP in Apple's
-`_VZVirtualMachineAccessor addAccessorObserver:` / `_VZVNCServer _setupVirtualMachineAccessor`.
-The same assertion recurred seven times while switching consoles in the browser. Each navigation previously
-unmounted noVNC and created a fresh TCP connection on return. A separate direct authenticated RFB test
-also crashed the Apple server, but in `receive_client_message_set_encodings` with a raw-only encoding
-list: this is a different signature and does not establish the reconnect assertion's exact cause.
-The guest service restarted automatically. The exact trigger and concurrent-viewer behavior
-have not been established; do not treat this as a production stability guarantee or use raw VNC banner probes
-as a health check. The installer probes disposable TCP servers, not the running Apple VNC server.
+**Confirmed reconnect crash on the tested host build:** Tart 2.40.1 / macOS 27.2 beta (26B5091g)
+can terminate the guest on a new graphical VNC connection after the last client disconnects. Apple's
+VNC server registers the same accessor observer again and hits `Base::assertion_trap`. A direct RFB
+reproduction, with a ten-second gap and no Proxmacs/browser involved, produced the same SIGTRAP.
+Keeping one graphical client connected allowed five additional connect/disconnect cycles without a crash.
+The navigation workaround does not protect page reload or panel/browser restart. A supervised persistent
+client is a tested candidate, **not deployed**; see [evidence and limits](docs/vnc-reconnect-crash.md).
+Do not use raw VNC probes as health checks. The installer probes disposable TCP servers, not Apple VNC.
 
 
 The browser obtains current credentials through an authenticated, non-cacheable same-origin POST, then connects
