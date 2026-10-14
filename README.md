@@ -266,3 +266,98 @@ and snapshots already pushed to SMB or PBS are left alone.
   cloud-init starts over (at most twice).
 - Secrets are kept in an owner-only file rather than the Keychain: the login Keychain prompts after every rebuild
   of an ad-hoc-signed binary.
+
+## System-managed macOS VMs and browser consoles
+
+This fork can integrate existing launchd-managed macOS VMs without replacing their owner or networking.
+Set `TART_HOME` to their existing storage and add normal Proxmacs VM metadata with autostart disabled.
+The system services remain responsible for boot-time startup. In the Proxmacs support directory,
+`external-vms.json` identifies services and their verified virtual disk capacity:
+
+```json
+{
+  "mac-build": {
+    "service": "system/com.example.tart.mac-build",
+    "ip": "192.0.2.2",
+    "diskGB": 200,
+    "consoleFile": "/srv/tart/vms/mac-build/.proxmacs-console/session.json"
+  }
+}
+```
+
+Use a launchctl service target such as `system/com.example.tart.mac-build` for `service`.
+The catalog does not enable read-only mode. Direct app launch opens the web dashboard.
+The integration exposes power controls, offline hardware changes, local backups/restore and offsite controls.
+Configure your existing lifecycle command and a narrowly privileged owner helper in `external-control.json`:
+
+```json
+{
+  "powerCommand": "/absolute/path/to/vmctl",
+  "ownerHelper": "/absolute/path/to/restricted-owner-helper",
+  "ownerUser": "vmowner",
+  "reservedMemoryMB": 16384
+}
+```
+
+The power command receives `start|stop|restart VM`; it must coordinate the system service and wait for the operation.
+The helper runs through `sudo -n -H -u ownerUser` and receives `VM stop 0` or `VM set CPU MEMORY_MB DISK_GB`.
+Install and validate your deployment's restrictive sudoers policy separately; the web process does not need root.
+Networking remains managed by the existing system launcher. macOS backups cleanly shut down and resume running VMs.
+Save guest work first. Restore requires a stopped VM and verified capacity in the backup record; ASIF file length
+is not virtual capacity. System-service deletion, macOS creation/cloning, extra disks/shares and autostart edits
+are not implemented. Linux VMs retain the upstream lifecycle and serial console.
+
+### Graphical Console
+
+The macOS Console tab embeds [noVNC](https://novnc.com/): keyboard and mouse control are enabled by default,
+with optional view-only mode, fit-to-window, fullscreen, Command-Space and reconnect controls.
+It uses Tart's **experimental** `--vnc-experimental` display server, not guest Screen Sharing.
+Compatibility depends on Apple's private VNC implementation; verify it before relying on recovery access.
+
+`scripts/console-runner.py` supervises Tart as the existing VM owner, captures its VNC URL before it reaches logs,
+checks that the VNC port listens exclusively on loopback, and publishes a per-boot endpoint with mode 0600 and
+an ACL granting the panel account read access. Credentials are removed when Tart exits. An unsafe listener or
+supervisor failure pauses its system launcher and terminates that VM process, preventing repeated restarts; test on a guest that can be safely stopped first.
+
+For an existing root-owned Bash launcher that sets `TART_HOME` and uses `exec "$TART_BIN" run ...`, the installer
+preserves its network flags, keychain setup and pause handling. Review the launcher, then run:
+
+```bash
+python3 scripts/install-console-launcher.py --check \
+  --launcher '/absolute/path/to/run-vm.sh' --python /absolute/path/to/python3 --reader paneluser
+sudo python3 scripts/install-console-launcher.py \
+  --launcher '/absolute/path/to/run-vm.sh' --python /absolute/path/to/python3 --reader paneluser
+```
+
+The installer backs up the launcher as `run-vm.sh.pre-proxmacs-console` and does **not** restart any VM.
+Enable it per VM by creating `<TART_HOME>/vms/<name>/.console-enabled`, then coordinate a full shutdown/start.
+Point `consoleFile` at the runtime `session.json` as shown above. Without the marker, the supervisor immediately
+executes the original Tart command. Removing the marker and starting again disables VNC without another root operation.
+If the loopback check fails, remove the enable marker before using the normal lifecycle tool to resume the paused VM.
+Full launcher rollback uses the same installer command with `--rollback`, followed by a coordinated shutdown/start.
+Never use the upstream uninstall script against these existing services.
+
+The browser obtains current credentials through an authenticated, non-cacheable same-origin POST, then connects
+through the panel's WebSocket endpoint. Ports and passwords are not placed in URLs. The server verifies the
+endpoint PID against Tart's POSIX config lock and checks it again during a connection; logout or a replaced
+VM session closes the connection within two seconds. Only a current browser login with a matching Origin can
+use the graphical console. Reverse proxies must preserve the expected HTTPS scheme and Host; direct HTTPS is
+the supported deployment. Do not publish the raw VNC listener.
+
+Validation:
+
+```bash
+npm --prefix web ci
+npm --prefix web run build
+PROXMACS_HEADLESS=1 swift build -c release
+PROXMACS_HEADLESS=1 PROXMACS_SUPPORT_DIR=/tmp/proxmacs-tests-support TART_HOME=/tmp/proxmacs-tests-tart swift test -c release
+PYTHONDONTWRITEBYTECODE=1 python3 scripts/test-console-runner.py
+PYTHONDONTWRITEBYTECODE=1 python3 scripts/test-console-integration.py --binary /absolute/path/to/built/Proxmacs
+```
+
+The integration check creates and removes isolated storage and a loopback RFB fixture; no real VM is used.
+It checks login/Origin restrictions, WebSocket data flow, logout, stale endpoints, permissions and secret redaction.
+The fixture also supports VNC password authentication and a colored framebuffer for manual noVNC/input checks.
+Full Swift tests need an Xcode installation with XCTest; some Command Line Tools distributions cannot run them.
+`PROXMACS_HEADLESS=1` excludes the native SwiftUI menu when its macros are unavailable; CLI and web UI remain usable.
+Third-party notices ship under `/licenses/novnc/` in the web assets.

@@ -87,6 +87,7 @@ struct WebAPI: Sendable {
             let listening = await Self.listeningURLs(settings)
             return API.json([
                 "hostname": ProcessInfo.processInfo.hostName,
+                "monitorOnly": false,
                 "tartVersion": tartVersion as Any? ?? NSNull(),
                 "cpus": ProcessInfo.processInfo.activeProcessorCount,
                 "memoryBytes": ProcessInfo.processInfo.physicalMemory,
@@ -208,6 +209,7 @@ struct WebAPI: Sendable {
         return [
             "cloudInit": cloudInit, "seedPending": item.meta.seedPending, "image": item.meta.image as Any? ?? NSNull(),
             "hasSeed": FileManager.default.fileExists(atPath: Paths.seedISO(item.name).path),
+            "external": MacControl.external(item.name), "macOS": MacControl.isMac(item.name),
             "name": item.name, "state": item.state, "ip": item.ip as Any? ?? NSNull(), "network": network,
             "cpus": item.cpus as Any? ?? NSNull(), "memoryMB": item.memoryMB as Any? ?? NSNull(), "diskGB": item.diskGB as Any? ?? NSNull(),
             "autostart": item.meta.autostart, "activity": activity as Any? ?? NSNull(),
@@ -732,6 +734,25 @@ struct WebAPI: Sendable {
     // MARK: Console
 
     private func registerConsole(_ router: Router<WebContext>) {
+        router.post("/api/vms/:name/console/session") { request, context in
+            guard await GraphicalConsole.authorize(request, tls: self.settings.tls) else {
+                return API.error("A same-origin login session is required", status: .forbidden)
+            }
+            return await API.guarded {
+                let endpoint = try GraphicalConsole.endpoint(Self.param(context, "name"))
+                return API.json(["password": endpoint.password])
+            }
+        }
+        router.ws("/api/vms/:name/console/vnc") { request, context in
+            guard await GraphicalConsole.authorize(request, tls: self.settings.tls),
+                  let name = context.parameters.get("name"),
+                  (try? GraphicalConsole.endpoint(name)) != nil else { return .dontUpgrade }
+            return .upgrade([:])
+        } onUpgrade: { inbound, outbound, context in
+            guard let name = context.requestContext.parameters.get("name") else { return }
+            let session = context.request.cookies[SessionStore.cookieName]?.value
+            try await GraphicalConsole.run(name: name, session: session, inbound: inbound, outbound: outbound)
+        }
         router.ws("/api/vms/:name/console") { _, context in
             guard let name = context.parameters.get("name"),
                   FileManager.default.fileExists(atPath: VMRunner.socketPath(name).path) else { return .dontUpgrade }

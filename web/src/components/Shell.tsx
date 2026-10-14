@@ -21,10 +21,13 @@ import { Badge, Loading, Spinner, StateBadge, StateDot, Tags } from './ui';
 // xterm is large; load it with the console tab.
 const ConsoleView = lazy(() => import('../views/vm/Console').then((m) => ({ default: m.ConsoleView })));
 
+const GraphicalConsoleView = lazy(() => import('../views/vm/GraphicalConsole').then((m) => ({ default: m.GraphicalConsoleView })));
+
 const HOST_TABS = [
   ['summary', 'Summary'], ['storage', 'Storage'], ['jobs', 'Backup Jobs'], ['targets', 'Backup Targets'],
   ['notifications', 'Notifications'], ['images', 'Images'],
 ] as const;
+const MAC_TABS = [['summary', 'Summary'], ['console', 'Console'], ['hardware', 'Hardware'], ['backups', 'Backups'], ['offsite', 'Offsite']] as const;
 const VM_TABS = [
   ['summary', 'Summary'], ['hardware', 'Hardware'], ['cloudinit', 'Cloud-Init'], ['options', 'Options'],
   ['console', 'Console'], ['backups', 'Backups'], ['offsite', 'Offsite'],
@@ -43,7 +46,7 @@ export function Shell({ onLogout }: { onLogout: () => void }) {
   // Fall back to the host when the VM is gone; unknown tabs show the summary.
   let route = rawRoute;
   if (route.type === 'vm' && app.loaded && !app.vm(route.name)) route = { type: 'host', tab: 'summary' };
-  const tabs = route.type === 'vm' ? VM_TABS : HOST_TABS;
+  const tabs = app.host?.monitorOnly ? ([['summary', 'Summary']] as const) : route.type === 'vm' ? (app.vm(route.name)?.external ? MAC_TABS : VM_TABS) : HOST_TABS;
   if (!tabs.some(([id]) => id === route.tab)) route = { ...route, tab: 'summary' };
   // Rewrite the URL only when the route was corrected; otherwise a render that lands between a URL
   // change and its hashchange event would put the old route back.
@@ -96,6 +99,7 @@ function Topbar({ onCreate, onLogout, navigate, navOpen, onToggleNav }: {
             : <Badge kind="err" title="The tart binary was not found on this Mac">Tart not found</Badge>}
         </>}
       </div>
+      {host?.monitorOnly && <Badge>Monitoring only</Badge>}
       <div className="spacer" />
       {memory && usedPct != null && (
         <button type="button" className={`mem-indicator ${memory.pressure}`} title={`Memory pressure: ${memory.pressure}`}
@@ -117,7 +121,7 @@ function Topbar({ onCreate, onLogout, navigate, navOpen, onToggleNav }: {
           ? <><Spinner /><span className="wide-only">{plural(running, 'task')} running</span><span className="narrow-only">{running}</span></>
           : <><span className="wide-only">No running tasks</span><span className="narrow-only">Tasks</span></>}
       </button>
-      <button type="button" className="btn primary" onClick={onCreate}><span className="wide-only">Create VM</span><span className="narrow-only">New VM</span></button>
+      <button type="button" className="btn primary" disabled={!host || host.monitorOnly} onClick={onCreate}><span className="wide-only">Create VM</span><span className="narrow-only">New VM</span></button>
       <button type="button" className="btn wide-only" onClick={onLogout}>Log out</button>
     </header>
   );
@@ -172,7 +176,7 @@ function Tree({ route, navigate, open, onLogout }: { route: Route; navigate: Nav
 
 function Content({ route, navigate }: { route: Route; navigate: Navigate }) {
   const app = useApp();
-  const tabs = route.type === 'vm' ? VM_TABS : HOST_TABS;
+  const tabs = app.host?.monitorOnly ? ([['summary', 'Summary']] as const) : route.type === 'vm' ? (app.vm(route.name)?.external ? MAC_TABS : VM_TABS) : HOST_TABS;
   const vm = route.type === 'vm' ? app.vm(route.name) : null;
   const full = route.type === 'vm' && route.tab === 'console';
 
@@ -192,7 +196,7 @@ function Content({ route, navigate }: { route: Route; navigate: Navigate }) {
       hardware: <HardwareView {...props} />,
       cloudinit: <CloudInitView {...props} />,
       options: <OptionsView vm={vm} />,
-      console: <Suspense fallback={<Loading />}><ConsoleView vm={vm} /></Suspense>,
+      console: <Suspense fallback={<Loading />}>{vm.external && vm.macOS ? <GraphicalConsoleView vm={vm} /> : <ConsoleView vm={vm} />}</Suspense>,
       backups: <BackupsView {...props} />,
       offsite: <OffsiteView {...props} />,
     }[route.tab] ?? <VMSummary {...props} />;

@@ -1,0 +1,4 @@
+This distribution includes unmodified noVNC 1.7.0 core modules, bundled by Vite.
+Copyright the noVNC contributors; see AUTHORS and the accompanying licenses.
+Source: https://github.com/novnc/noVNC/tree/v1.7.0
+Package: https://www.npmjs.com/package/@novnc/novnc/v/1.7.0

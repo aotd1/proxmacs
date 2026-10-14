@@ -1,0 +1,3 @@
+
+# Preserve upstream third-party notices verbatim.
+web/public/licenses/novnc/* -whitespace
