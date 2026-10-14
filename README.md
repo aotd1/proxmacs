@@ -47,6 +47,26 @@ A Proxmox-flavoured menubar VM manager for Apple Silicon Macs, built on [Tart](h
 
 Regenerate them with `scripts/docs-screenshots.swift` (see the comment at its top).
 
+## Why Tart
+
+- **Bridging needs an entitlement only Apple can grant.**
+  - Virtualization.framework's bridged network attachment needs `com.apple.vm.networking`.
+  - Apple hands that entitlement out per developer, through a provisioning profile, so an ad-hoc or self-signed app
+    can't have it.
+  - Tart's official build carries it. Running that binary gives VMs native bridging with no root helper, no
+    `socket_vmnet` and no kernel extension.
+  - The alternatives cost more: QEMU or a self-built VZ app would need a privileged daemon for bridging, or would be
+    limited to NAT.
+- **It already does the VM plumbing.**
+  - Tart handles the VM bundle (config, disk, NVRAM, MAC), EFI boot of Linux guests and the serial console.
+  - Its guest agent supplies VM IPs (`tart ip --resolver agent`, which also works on bridged VMs) and runs commands
+    in the guest (`tart exec`). Backups use `tart exec` to freeze the filesystem.
+- **Proxmacs stays simple.**
+  - It shells out to the `tart` binary and doesn't link Virtualization.framework.
+  - It needs no entitlements or sandbox, and works as an ad-hoc-signed build from source.
+  - The boundary is a CLI, so Tart can be upgraded on its own, and Tart's license (FSL-1.1-ALv2, fine for personal
+    and internal use) stays separate from Proxmacs's AGPL code.
+
 ## Requirements
 
 ```bash
@@ -185,4 +205,3 @@ and snapshots already pushed to SMB or PBS are left alone.
 - Shut VMs down before ejecting a drive that holds their disks.
 - Secrets are kept in an owner-only file rather than the Keychain: the login Keychain prompts after every rebuild
   of an ad-hoc-signed binary.
-- Tart is licensed under FSL-1.1-ALv2: fine for personal and internal use.
