@@ -92,6 +92,15 @@ struct AuthMiddleware<Context: RequestContext>: RouterMiddleware {
         guard path.hasPrefix("/api/"), path != "/api/login", path != "/api/session" else {
             return try await next(request, context)
         }
+        // Programs use an API key instead of a login session. Browsers never send this header on their own,
+        // so the CSRF rule below doesn't apply.
+        if let authorization = request.headers[.authorization] {
+            let token = authorization.hasPrefix("Bearer ") ? String(authorization.dropFirst(7)).trimmingCharacters(in: .whitespaces) : ""
+            guard APIKeyStore.shared.authenticate(token) != nil else {
+                return API.error("Invalid API key (expected Authorization: Bearer pmx_…)", status: .unauthorized)
+            }
+            return try await next(request, context)
+        }
         guard await SessionStore.shared.isValid(request.cookies[SessionStore.cookieName]?.value) else {
             return API.error("Not authenticated", status: .unauthorized)
         }

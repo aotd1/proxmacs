@@ -83,6 +83,7 @@ struct MenuContent: View {
 
 struct WebUISection: View {
     @Environment(AppState.self) private var state
+    @Environment(\.openWindow) private var openWindow
     private var server: WebServer { WebServer.shared }
     @State private var settings = WebSettings.load()
 
@@ -109,6 +110,11 @@ struct WebUISection: View {
                             .buttonStyle(.link)
                             .font(.caption)
                         Spacer()
+                        Button("API Keys…") {
+                            openWindow(id: "api-keys")
+                            activateApp()
+                        }
+                        .font(.caption)
                         Button(WebAuth.hasPassword ? "Change Password…" : "Set Password…", action: setPassword)
                             .font(.caption)
                     }

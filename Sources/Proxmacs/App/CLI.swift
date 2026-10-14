@@ -68,6 +68,9 @@ enum CLI {
 
       console <name>                   attach to the serial console (Ctrl-] detaches)
       web-passwd [--stdin]             set the web UI admin password
+      api-keys                         list API keys (docs/API.md)
+      api-key-add <name>               create an API key; it is printed once
+      api-key-rm <name|id>             revoke an API key
       serve                            run the web UI headless (no menubar)
     """
 
@@ -539,6 +542,24 @@ enum CLI {
             guard first == prompt("Repeat: ") else { throw ProxmacsError("Passwords don't match") }
             try WebAuth.setPassword(first)
             print("Password set.")
+
+        case "api-keys":
+            let used = APIKeyStore.shared.lastUsed()
+            for key in APIKeyStore.shared.load() {
+                print([key.name, key.prefix + "…", "created " + key.created.formatted(date: .abbreviated, time: .shortened),
+                       used[key.id].map { "last used " + $0.formatted(date: .abbreviated, time: .shortened) } ?? "never used", key.id]
+                    .joined(separator: "\t"))
+            }
+
+        case "api-key-add":
+            let created = try APIKeyStore.shared.create(name: try name())
+            // The key alone on stdout, so scripts can capture it; the note goes to stderr.
+            FileHandle.standardError.write(Data("API key \(created.key.name) created. It isn't stored: keep it now.\n".utf8))
+            print(created.secret)
+
+        case "api-key-rm":
+            try APIKeyStore.shared.remove(try name())
+            print("Revoked.")
 
         case "serve":
             let served = AppState()

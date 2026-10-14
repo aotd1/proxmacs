@@ -24,8 +24,12 @@ enum CloudInitSeed {
         }
     }
 
+    /// Where the provisioning script records the instance-id it finished (see `ProvisionState`).
+    static let provisionedMarker = "/var/lib/proxmacs/provisioned"
+
     /// `newIdentity`: a clone's first boot, which must not keep its source's SSH host keys and machine-id.
-    static func userData(hostname: String, config: CloudInitConfig, newIdentity: Bool = false) -> String {
+    /// `instance`: the seed's instance-id, recorded in the guest once provisioning finishes.
+    static func userData(hostname: String, config: CloudInitConfig, newIdentity: Bool = false, instance: String? = nil) -> String {
         var lines = [
             "#cloud-config",
             "hostname: \(q(hostname))",
@@ -73,7 +77,7 @@ enum CloudInitSeed {
             "    permissions: '0700'",
             "    content: |",
         ]
-        lines += provisionScript(config, newIdentity: newIdentity).split(separator: "\n", omittingEmptySubsequences: false).map { "      \($0)" }
+        lines += provisionScript(config, newIdentity: newIdentity, instance: instance).split(separator: "\n", omittingEmptySubsequences: false).map { "      \($0)" }
         lines += [
             "runcmd:",
             "  - [/usr/local/sbin/proxmacs-provision]",
@@ -83,7 +87,7 @@ enum CloudInitSeed {
 
     /// Runs once per instance (i.e. after every seed rebuild): installs the guest agent and makes the
     /// user's authorized_keys and password exactly what Proxmacs has configured.
-    static func provisionScript(_ config: CloudInitConfig, newIdentity: Bool = false) -> String {
+    static func provisionScript(_ config: CloudInitConfig, newIdentity: Bool = false, instance: String? = nil) -> String {
         // Values are validated (user name, $6$ hash alphabet), so single-quoting is safe.
         var script = """
         #!/bin/sh
@@ -104,6 +108,21 @@ enum CloudInitSeed {
         systemctl enable tart-guest-agent
         systemctl restart tart-guest-agent
         systemctl enable --now proxmacs-shares.service
+        # A first boot cut short can leave empty host key files; cloud-init keeps existing keys, and sshd
+        # won't start with them.
+        regen=
+        for key in /etc/ssh/ssh_host_*_key; do
+          [ -e "$key" ] || continue
+          if ! { [ -s "$key" ] && [ -s "$key.pub" ] && ssh-keygen -l -f "$key.pub" >/dev/null 2>&1; }; then
+            rm -f "$key" "$key.pub"
+            regen=1
+          fi
+        done
+        if [ -n "$regen" ]; then
+          ssh-keygen -A
+          systemctl reset-failed ssh sshd 2>/dev/null
+          systemctl restart ssh 2>/dev/null || systemctl restart sshd
+        fi
         home=$(getent passwd "$user" | cut -d: -f6)
         if [ -n "$home" ]; then
           group=$(id -g "$user")
@@ -128,6 +147,11 @@ enum CloudInitSeed {
             } else {
                 script += "passwd -l \"$user\"\n"
             }
+        }
+        if let instance {
+            // Last, so the host only sees it once everything above has run.
+            script += "mkdir -p \(URL(fileURLWithPath: provisionedMarker).deletingLastPathComponent().path)\n"
+            script += "echo '\(instance)' > \(provisionedMarker)\n"
         }
         return script
     }
@@ -162,9 +186,10 @@ enum CloudInitSeed {
         try FileManager.default.createDirectory(at: stage, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: stage) }
 
-        let metaData = "instance-id: \(UUID().uuidString.lowercased())\nlocal-hostname: \(name)\n"
+        let instance = UUID().uuidString.lowercased()
+        let metaData = "instance-id: \(instance)\nlocal-hostname: \(name)\n"
         try metaData.write(to: stage.appending(path: "meta-data"), atomically: true, encoding: .utf8)
-        try userData(hostname: name, config: config, newIdentity: newIdentity).write(to: stage.appending(path: "user-data"), atomically: true, encoding: .utf8)
+        try userData(hostname: name, config: config, newIdentity: newIdentity, instance: instance).write(to: stage.appending(path: "user-data"), atomically: true, encoding: .utf8)
         try networkConfig(config.network).write(to: stage.appending(path: "network-config"), atomically: true, encoding: .utf8)
         for package in agentPackages {
             try FileManager.default.copyItem(at: package, to: stage.appending(path: "tart-guest-agent.\(package.pathExtension)"))
@@ -187,6 +212,7 @@ enum CloudInitSeed {
         // The seed holds the password hash.
         try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: iso.path)
         try? Data(String(version).utf8).write(to: versionFile(name))
+        ProvisionState(instance: instance).save(name)
     }
 
     /// YAML-safe scalar: a JSON string literal is valid YAML.
@@ -199,5 +225,35 @@ enum CloudInitSeed {
     private static func q(_ s: String) -> String {
         let data = (try? encoder.encode(s)) ?? Data("\"\"".utf8)
         return String(decoding: data, as: UTF8.self)
+    }
+}
+
+/// Whether the guest finished provisioning from the current seed. cloud-init marks each per-instance
+/// module done as it starts it, so a first boot cut short (the VM stopped early) never gets the guest
+/// agent, users or keys. VMRunner then rebuilds the seed with a new instance-id, which makes cloud-init
+/// start over. Seeds built before this existed have no state and are left alone.
+struct ProvisionState: Codable, Equatable {
+    var instance: String
+    /// A boot from this seed has started.
+    var booted = false
+    /// The guest reported (through the agent) that provisioning ran to the end.
+    var done = false
+    /// Rebuilds because provisioning didn't finish; capped so a guest that can never report back
+    /// (e.g. no agent for its distribution) isn't re-provisioned on every boot.
+    var retries = 0
+
+    static let maxRetries = 2
+
+    var needsRetry: Bool { booted && !done && retries < Self.maxRetries }
+
+    static func file(_ vm: String) -> URL { Paths.vmDir(vm).appending(path: "provision.json") }
+
+    static func load(_ vm: String) -> ProvisionState? {
+        guard let data = try? Data(contentsOf: file(vm)) else { return nil }
+        return try? JSONDecoder().decode(ProvisionState.self, from: data)
+    }
+
+    func save(_ vm: String) {
+        try? JSONEncoder().encode(self).write(to: Self.file(vm), options: .atomic)
     }
 }

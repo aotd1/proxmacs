@@ -24,6 +24,11 @@ struct ProxmacsApp: App {
         }
         .windowResizability(.contentSize)
 
+        Window("API Keys", id: "api-keys") {
+            APIKeysView()
+        }
+        .windowResizability(.contentSize)
+
         WindowGroup("Backups", id: "backups", for: String.self) { $name in
             if let name {
                 BackupsView(name: name)

@@ -33,12 +33,12 @@ enum VMRunner {
             print("proxmacs: start order: waiting \(delay) s")
             Thread.sleep(forTimeInterval: TimeInterval(delay))
         }
-        if meta.seedPending || meta.newIdentity {
+        if meta.seedPending {
             // This boot picks up the rebuilt seed.
             meta.seedPending = false
-            meta.newIdentity = false
             try? meta.save()
         }
+        let provisioning = prepareProvisioning(vm, meta: &meta)
 
         // 1. Our own pty; raw mode on the VM side so nothing is echoed or translated.
         var master: Int32 = -1, slave: Int32 = -1
@@ -61,6 +61,9 @@ enum VMRunner {
         process.environment = Tart.environment
         try process.run()
         print("proxmacs: started tart (pid \(process.processIdentifier)), console on \(slavePath)")
+        if let provisioning {
+            Task.detached { await confirmProvisioning(vm, instance: provisioning, tart: tart) }
+        }
 
         // Forward launchd's SIGTERM (bootout) / SIGINT to tart so the guest shuts down cleanly.
         for sig in [SIGTERM, SIGINT] {
@@ -76,6 +79,71 @@ enum VMRunner {
         print("proxmacs: tart exited with status \(process.terminationStatus)")
         _ = slave  // keep the slave open for the VM's whole lifetime
         exit(process.terminationStatus)
+    }
+
+    /// Rebuilds the seed if the last boot from it didn't finish provisioning, and records this boot.
+    /// Returns the instance-id to watch for, or nil when there is nothing to confirm.
+    private static func prepareProvisioning(_ vm: String, meta: inout VMMeta) -> String? {
+        guard var state = ProvisionState.load(vm) else {
+            // A seed from before provisioning was tracked: the old behaviour.
+            if meta.newIdentity {
+                meta.newIdentity = false
+                try? meta.save()
+            }
+            return nil
+        }
+        if state.needsRetry {
+            print("proxmacs: provisioning didn't finish on the last boot: rebuilding the cloud-init seed")
+            let config = meta.effectiveCloudInit, newIdentity = meta.newIdentity
+            do {
+                try blocking {
+                    let agent = try await ImageStore.agentPackages { _, _ in }
+                    try await CloudInitSeed.build(name: vm, config: config, agentPackages: agent, newIdentity: newIdentity)
+                }
+                let retries = state.retries + 1
+                state = ProvisionState.load(vm) ?? state
+                state.retries = retries
+            } catch {
+                print("proxmacs: cannot rebuild the seed: \(error.localizedDescription)")
+            }
+        }
+        guard !state.done else { return nil }
+        state.booted = true
+        state.save(vm)
+        return state.instance
+    }
+
+    /// Polls the guest (through the agent) for the marker the provisioning script writes last.
+    private static func confirmProvisioning(_ vm: String, instance: String, tart: Tart) async {
+        let deadline = Date().addingTimeInterval(30 * 60)
+        while Date() < deadline {
+            try? await Task.sleep(for: .seconds(10))
+            guard let result = try? await tart.exec(vm, ["cat", CloudInitSeed.provisionedMarker], timeout: 10), result.succeeded,
+                  result.stdout.trimmingCharacters(in: .whitespacesAndNewlines) == instance else { continue }
+            // The seed may have been rebuilt meanwhile (settings edited while running): that's a new instance.
+            guard var state = ProvisionState.load(vm), state.instance == instance else { return }
+            state.done = true
+            state.save(vm)
+            if var meta = VMMeta.load(vm), meta.newIdentity {
+                meta.newIdentity = false
+                try? meta.save()
+            }
+            print("proxmacs: provisioning finished")
+            return
+        }
+    }
+
+    /// Runs async work from this synchronous process (nothing in it needs the main actor).
+    private static func blocking(_ work: @escaping @Sendable () async throws -> Void) throws {
+        final class Outcome: @unchecked Sendable { var error: Error? }
+        let outcome = Outcome()
+        let done = DispatchSemaphore(value: 0)
+        Task.detached {
+            do { try await work() } catch { outcome.error = error }
+            done.signal()
+        }
+        done.wait()
+        if let error = outcome.error { throw error }
     }
 
     /// At login every start-on-login VM is launched at once; each waits for the startup delays of the

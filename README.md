@@ -46,6 +46,7 @@ A Proxmox-flavoured menubar VM manager for Apple Silicon Macs, built on [Tart](h
 - **Web UI**, Proxmox-style, at `https://<mac>:8006` (React + TypeScript, in `web/`): password login, VM list,
   actions and editing, host memory usage (Activity Monitor's breakdown, pressure, swap, memory assigned to running
   VMs, live chart), task log, backups/offsite management, and a browser serial console (xterm.js over WebSocket).
+  Scripts use the same JSON API with API keys: see [docs/API.md](docs/API.md).
   The menubar shows a memory gauge too. Works on phones and wide screens, and installs to the home screen as an app.
 - **VMs outlive the app**: each VM runs under its own LaunchAgent (`dev.proxmacs.vm.<name>`) as
   `Proxmacs cli run-vm <name>`, which supervises `tart run` and owns the serial console
@@ -189,7 +190,12 @@ How custom locations behave:
 ```bash
 $P cli web-passwd                # or Proxmacs menu → Web UI → Set Password…
 $P cli serve                     # headless, without the menubar
+$P cli api-key-add backup-script # or Proxmacs menu → Web UI → API Keys…; printed once
+$P cli api-keys                  # list; api-key-rm <name> revokes
 ```
+
+Programs call the API with `Authorization: Bearer pmx_…`. For now a key can do everything the admin password can.
+The API is documented in [docs/API.md](docs/API.md).
 
 Settings live in `web.json` (`enabled`, `port` 8006, `bind` 0.0.0.0, `tls` true). Host → Summary lists every
 address the web UI listens on. The self-signed certificate's
@@ -207,7 +213,7 @@ certificate (`tls` false, `bind` 127.0.0.1), for a full install. Icons are gener
 | Path | Contents |
 | --- | --- |
 | `~/Library/Application Support/Proxmacs/images/` | cached base images (`<id>-arm64.raw`, imported `*.raw`) and the agent `.deb`/`.rpm` |
-| `~/Library/Application Support/Proxmacs/vms/<name>/` | `meta.json` (incl. cloud-init settings), `seed.iso` (cloud-init), `run.log`, `console.log` |
+| `~/Library/Application Support/Proxmacs/vms/<name>/` | `meta.json` (incl. cloud-init settings), `seed.iso` (cloud-init), `provision.json`, `run.log`, `console.log` |
 | `~/Library/Application Support/Proxmacs/backups/<name>/<timestamp>/` | cloned `disk.img`, extra disks, `nvram.bin`, `config.json` (or `<backup storage>/<name>/…`) |
 | `~/Library/Application Support/Proxmacs/storage.json` | custom VM / backup storage locations |
 | `~/Library/Application Support/Proxmacs/offsite.json` | offsite targets |
@@ -215,6 +221,7 @@ certificate (`tls` false, `bind` 127.0.0.1), for a full install. Icons are gener
 | `~/Library/Application Support/Proxmacs/notifications.json` | notification webhooks (URLs are in `secrets.json`) |
 | `~/Library/Application Support/Proxmacs/secrets.json` | SMB passwords, PBS token secrets, webhook URLs, web password hash (mode 0600) |
 | `~/Library/Application Support/Proxmacs/web.json` | web UI settings |
+| `~/Library/Application Support/Proxmacs/apikeys.json` | API keys: names and SHA-256 hashes (mode 0600); last use in `apikeys-used.json` |
 | `~/Library/Application Support/Proxmacs/web/` | self-signed `cert.pem` / `key.pem` |
 | `~/.tart/vms/<name>/` | Tart's VM (owned by Tart) plus extra disks `disk<N>.img`, or `<VM storage>/vms/<name>/` |
 | `~/Library/LaunchAgents/dev.proxmacs.vm.<name>.plist` | per-VM runner |
@@ -253,5 +260,9 @@ and snapshots already pushed to SMB or PBS are left alone.
   without a seed (recreated from a backup) mount shares only by hand:
   `sudo mount -t virtiofs com.apple.virtio-fs.automount /mnt/shared`.
 - Tart can't combine NAT and bridged networking in one VM, so VMs have a single network card.
+- cloud-init records each first-boot step as done when it starts it, so a VM stopped during its first boot would
+  never get the guest agent, users or SSH host keys. Proxmacs notices that provisioning didn't finish (the guest
+  writes a marker last, read through the agent) and rebuilds the seed with a new instance-id on the next start, so
+  cloud-init starts over (at most twice).
 - Secrets are kept in an owner-only file rather than the Keychain: the login Keychain prompts after every rebuild
   of an ad-hoc-signed binary.

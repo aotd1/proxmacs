@@ -170,3 +170,64 @@ final class CloneSeedTests: XCTestCase {
         XCTAssertFalse(ExtraDisk.isValidFile("../disk1.img"))
     }
 }
+
+final class ProvisioningTests: XCTestCase {
+    func testScriptRecordsInstanceLast() {
+        let config = CloudInitConfig(user: "debian")
+        let script = CloudInitSeed.provisionScript(config, instance: "abc-123")
+        XCTAssertTrue(script.hasSuffix("echo 'abc-123' > \(CloudInitSeed.provisionedMarker)\n"))
+        XCTAssertTrue(script.contains("ssh-keygen -A"), "empty host keys from a cut-short boot are replaced")
+        XCTAssertFalse(CloudInitSeed.provisionScript(config).contains(CloudInitSeed.provisionedMarker))
+    }
+
+    func testRetryOnlyAfterAnUnfinishedBoot() {
+        var state = ProvisionState(instance: "a")
+        XCTAssertFalse(state.needsRetry, "never booted")
+        state.booted = true
+        XCTAssertTrue(state.needsRetry)
+        state.done = true
+        XCTAssertFalse(state.needsRetry)
+        state.done = false
+        state.retries = ProvisionState.maxRetries
+        XCTAssertFalse(state.needsRetry, "gives up on guests that never report back")
+    }
+}
+
+final class APIKeyTests: XCTestCase {
+    private var dir: URL!
+    private var store: APIKeyStore!
+
+    override func setUpWithError() throws {
+        dir = FileManager.default.temporaryDirectory.appending(path: "pmx-keys-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        store = APIKeyStore(directory: dir)
+    }
+
+    override func tearDownWithError() throws {
+        try? FileManager.default.removeItem(at: dir)
+    }
+
+    func testCreateAuthenticateRevoke() throws {
+        let (key, secret) = try store.create(name: "backup-script")
+        XCTAssertTrue(secret.hasPrefix("pmx_"))
+        XCTAssertEqual(secret.count, 4 + 64)
+        XCTAssertTrue(secret.hasPrefix(key.prefix))
+        let stored = try String(contentsOf: store.file, encoding: .utf8)
+        XCTAssertFalse(stored.contains(secret), "only a hash is stored")
+        let mode = try FileManager.default.attributesOfItem(atPath: store.file.path)[.posixPermissions] as? Int
+        XCTAssertEqual(mode, 0o600)
+
+        XCTAssertEqual(store.authenticate(secret)?.id, key.id)
+        XCTAssertNotNil(store.lastUsed()[key.id])
+        XCTAssertNil(store.authenticate(secret.dropLast() + "0"))
+        XCTAssertNil(store.authenticate(""))
+
+        XCTAssertThrowsError(try store.create(name: "backup-script"), "names are unique")
+        XCTAssertThrowsError(try store.create(name: "  "))
+
+        try store.remove("backup-script")
+        XCTAssertNil(store.authenticate(secret))
+        XCTAssertNil(store.lastUsed()[key.id])
+        XCTAssertThrowsError(try store.remove("backup-script"))
+    }
+}
