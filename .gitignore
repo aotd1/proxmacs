@@ -4,3 +4,11 @@ build/
 *.xcodeproj
 web/node_modules/
 web/dist/
+
+__pycache__/
+# Host-specific deployment notes and privileged adapters stay local.
+/CONTROL-UPGRADE.md
+/LOCAL-DEPLOYMENT.md
+/scripts/install-owner-helper.sh
+/scripts/proxmacs-tart-control
+/scripts/test-owner-helper.py

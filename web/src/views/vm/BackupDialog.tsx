@@ -60,6 +60,7 @@ export function BackupButton({ vm, className = '' }: { vm: VM; className?: strin
   const [open, setOpen] = useState(false);
   const unavailable = vm.state === 'missing' || vm.state === 'offline';
   const click = async () => {
+    if (vm.external && vm.state === 'running' && !window.confirm('The macOS VM will shut down briefly for a consistent backup, then restart. Save any open work first. Continue?')) return;
     if (app.targets.length) { setOpen(true); return; }
     try {
       await app.startTask('POST', `/api/vms/${enc(vm.name)}/backup`, {}, `Back up ${vm.name}`);

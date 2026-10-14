@@ -580,3 +580,38 @@ input.narrow { width: 90px; }
 .vm-checks { display: flex; flex-wrap: wrap; gap: 6px 16px; max-height: 180px; overflow: auto; }
 .form-row .grow { flex: 1; min-width: min(100%, 220px); }
 .field > .segmented { align-self: flex-start; max-width: 100%; }
+
+/* Graphical console keeps its own scroll surface on desktop and narrow displays. */
+.graphical-console { position: relative; flex: 1; min-height: 0; min-width: 0; overflow: hidden; background: var(--panel-alt); border: 1px solid var(--border); border-radius: var(--radius); }
+.graphical-console-host { position: absolute; inset: 0; overflow: auto; }
+.graphical-console .term-overlay { padding: 16px; text-align: center; }
+
+/* The toolbar and native dialog stay inside the fullscreen element. */
+.console-workspace { display: flex; flex-direction: column; flex: 1; min-width: 0; min-height: 0; gap: 8px; }
+.console-workspace:fullscreen { padding: 12px; background: var(--bg); color: var(--text); }
+.graphical-toolbar { margin: 0; gap: 8px; }
+.graphical-toolbar select { max-width: 130px; }
+.console-options { position: relative; }
+.console-options summary { list-style: none; cursor: pointer; }
+.console-options summary::-webkit-details-marker { display: none; }
+.console-options-panel { position: absolute; z-index: 5; right: 0; width: min(280px, 80vw); padding: 12px; display: flex; flex-direction: column; gap: 12px; background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow); }
+.console-options-panel p { margin: 0; color: var(--muted); font-size: 12px; }
+.console-footer { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 6px 16px; font-size: 12px; color: var(--muted); }
+.console-paste-dialog { width: min(440px, calc(100vw - 32px)); max-height: calc(100dvh - 32px); overflow: auto; box-sizing: border-box; padding: 20px; color: var(--text); background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow); }
+.console-paste-dialog::backdrop { background: var(--backdrop); }
+.console-paste-dialog h3 { margin: 0 0 12px; }
+.console-paste-dialog p { color: var(--muted); }
+.console-paste-dialog input[type=password], .console-paste-dialog textarea { display: block; width: 100%; margin-top: 6px; box-sizing: border-box; font-family: var(--mono); }
+.console-paste-meta, .console-paste-actions { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 12px; }
+.console-paste-meta span { font-size: 12px; color: var(--muted); }
+.console-paste-actions { justify-content: flex-end; }
+.console-paste-dialog .check { margin-top: 12px; align-items: flex-start; }
+.console-transfer { display: flex; flex-direction: column; gap: 12px; }
+@media (max-width: 480px) { .graphical-toolbar .spacer { display: none; } .console-workspace:fullscreen { padding: 6px; } }
+
+@media (pointer: coarse) {
+  .graphical-toolbar .btn, .graphical-toolbar select, .console-paste-dialog .btn { min-height: 44px; }
+  .console-paste-dialog input[type=password], .console-paste-dialog textarea { font-size: 16px; }
+}
+
+.console-vm-label { overflow-wrap: anywhere; min-width: 0; }

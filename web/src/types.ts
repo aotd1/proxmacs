@@ -92,6 +92,8 @@ export interface OffsitePolicy {
 }
 
 export interface VM {
+  external?: boolean;
+  macOS?: boolean;
   name: string;
   state: VMState;
   ip: string | null;
@@ -135,6 +137,7 @@ export interface Task {
 }
 
 export interface Host {
+  monitorOnly?: boolean;
   hostname: string;
   tartVersion: string | null;
   cpus: number;

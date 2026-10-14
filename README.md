@@ -266,3 +266,210 @@ and snapshots already pushed to SMB or PBS are left alone.
   cloud-init starts over (at most twice).
 - Secrets are kept in an owner-only file rather than the Keychain: the login Keychain prompts after every rebuild
   of an ad-hoc-signed binary.
+
+## System-managed macOS VMs and browser consoles
+
+This fork can integrate existing launchd-managed macOS VMs without replacing their owner or networking.
+Set `TART_HOME` to their existing storage and add normal Proxmacs VM metadata with autostart disabled.
+The system services remain responsible for boot-time startup. In the Proxmacs support directory,
+`external-vms.json` identifies services and their verified virtual disk capacity:
+
+```json
+{
+  "mac-build": {
+    "service": "system/com.example.tart.mac-build",
+    "ip": "192.0.2.2",
+    "diskGB": 200,
+    "consoleFile": "/srv/tart/vms/mac-build/.proxmacs-console/session.json"
+  }
+}
+```
+
+Use a launchctl service target such as `system/com.example.tart.mac-build` for `service`.
+The catalog does not enable read-only mode. Direct app launch opens the web dashboard.
+The integration exposes power controls, offline hardware changes, local backups/restore and offsite controls.
+Configure your existing lifecycle command and a narrowly privileged owner helper in `external-control.json`:
+
+```json
+{
+  "powerCommand": "/absolute/path/to/vmctl",
+  "ownerHelper": "/absolute/path/to/restricted-owner-helper",
+  "ownerUser": "vmowner",
+  "reservedMemoryMB": 16384
+}
+```
+
+The power command receives `start|stop|restart VM`; it must coordinate the system service and wait for the operation.
+The helper runs through `sudo -n -H -u ownerUser` and receives `VM stop 0` or `VM set CPU MEMORY_MB DISK_GB`.
+Install and validate your deployment's restrictive sudoers policy separately; the web process does not need root.
+Networking remains managed by the existing system launcher. macOS backups cleanly shut down and resume running VMs.
+Save guest work first. Restore requires a stopped VM and verified capacity in the backup record; ASIF file length
+is not virtual capacity. System-service deletion, macOS creation/cloning, extra disks/shares and autostart edits
+are not implemented. Linux VMs retain the upstream lifecycle and serial console.
+
+### Graphical Console
+
+The macOS Console tab embeds [noVNC](https://novnc.com/): keyboard and mouse control are enabled by default,
+with a compact toolbar, view-only mode, fit/actual-size scaling, fullscreen and reconnect controls.
+Visited graphical consoles stay connected when navigating between VMs or other tabs. Hidden consoles
+are inert and view-only; leaving one cancels clipboard typing, clears the draft and releases held keys.
+Logging out or closing/reloading the page still closes these browser connections. The VM supervisor now
+keeps its own passive graphical connection alive independently of the browser and panel to avoid the
+confirmed Apple VNC last-client reconnect assertion. Existing installations need a supervisor upgrade
+and a clean VM restart to activate this protection; replacing web assets alone is insufficient.
+Type clipboard reads text on the browser device after a click, then previews it hidden by default.
+If clipboard access is denied, paste manually with Command-V (Mac) or Control-V. Select the destination
+field in the guest first. The confirmed text is sent as individual key events; Enter is never appended.
+Line breaks and Tab require an explicit opt-in because they can submit forms or move focus.
+Stop cancels remaining characters; it cannot undo characters already sent. Switching VM, disconnecting
+or hiding the page cancels the queue; it is never replayed after reconnect. Text is not saved or logged.
+Unicode and keyboard-layout compatibility depend on the Apple VNC server and must be verified in the guest.
+It uses Tart's **experimental** `--vnc-experimental` display server, not guest Screen Sharing.
+Compatibility depends on Apple's private VNC implementation; verify it before relying on recovery access.
+
+**Real-host compatibility:** Tart 2.40.1 on macOS 27.2 beta (26B5091g) binds a wildcard VNC socket
+(`*:port`) even though it prints a localhost URL. This was reproduced without a VM. The default loopback-only
+supervisor rejects it. The optional PF deployment below permits wildcard VNC only while a root-owned monitor
+reports that the dedicated VM owner's inbound sockets are protected. Never simply disable the listener check.
+
+`scripts/console-runner.py` runs as the VM owner, captures the VNC URL before it reaches logs, and publishes a
+per-boot endpoint with mode 0600 and an ACL granting the panel account read access. The socket must be loopback-only
+or covered by the explicitly configured PF monitor. Before publishing credentials, the supervisor activates
+a shared RFB display and keeps that connection for the Tart process lifetime. It requests one small framebuffer
+update, drains incoming traffic without retaining it, and sends no keyboard, pointer or clipboard input.
+Initialization runs separately so PF checks continue during a slow handshake. If this connection fails,
+credentials are withdrawn and existing browser bridges close within two seconds; the VM keeps running.
+There is no automatic reconnect or VM restart: restoring the console requires a planned clean VM restart.
+Credentials are also removed when Tart exits. Other fatal supervisor errors still pause the system launcher
+and terminate that VM; loss of PF protection still kills it immediately. Test upgrades on a disposable guest.
+
+For an existing root-owned Bash launcher that sets `TART_HOME` and uses `exec "$TART_BIN" run ...`, the installer
+preserves its network flags, keychain setup and pause handling. Review the launcher, then run:
+
+```bash
+python3 scripts/install-console-launcher.py --check \
+  --launcher '/absolute/path/to/run-vm.sh' --python /absolute/path/to/python3 --reader paneluser
+sudo python3 scripts/install-console-launcher.py \
+  --launcher '/absolute/path/to/run-vm.sh' --python /absolute/path/to/python3 --reader paneluser
+```
+
+The installer backs up the launcher as `run-vm.sh.pre-proxmacs-console` and does **not** restart any VM.
+Enable it per VM by creating `<TART_HOME>/vms/<name>/.console-enabled`, then coordinate a full shutdown/start.
+Point `consoleFile` at the runtime `session.json` as shown above. Without the marker, the supervisor immediately
+executes the original Tart command. Removing the marker and starting again disables VNC without another root operation.
+If the loopback check fails, remove the enable marker before using the normal lifecycle tool to resume the paused VM.
+Full launcher rollback uses the same installer command with `--rollback`, followed by a coordinated shutdown/start.
+Never use the upstream uninstall script against these existing services.
+
+
+#### Optional PF protection for wildcard Apple VNC
+
+This deployment needs a **dedicated VM service account**, a different panel account, stock Apple root PF anchor
+layout (including a trailing Apple Internet Sharing anchor), and an SSH-accessible machine on the same network for IPv4/IPv6 probes. The PF rule blocks new inbound TCP
+connections to sockets owned by that account on every interface except `lo0`. It has no port number, so it is in
+place before Tart allocates a random VNC port. The SYN filter preserves replies to outbound host connections;
+forwarded guest traffic has no matching local socket owner. Guest network access must still be verified after installation.
+
+Review and run (replace the example paths, accounts, SSH alias and host addresses):
+
+```bash
+python3 scripts/install-console-pf.py --check \
+  --launcher '/absolute/path/to/run-vm.sh' --python /absolute/path/to/python3 \
+  --owner vmowner --reader paneluser --probe-ssh lan-probe \
+  --probe-v4 192.0.2.10 --probe-v6 'fe80::1%en0'
+sudo /usr/bin/python3 -I scripts/install-console-pf.py \
+  --launcher '/absolute/path/to/run-vm.sh' --python /absolute/path/to/python3 \
+  --owner vmowner --reader paneluser --probe-ssh lan-probe \
+  --probe-v4 192.0.2.10 --probe-v6 'fe80::1%en0'
+```
+
+`--python` must match the Python path in an already-installed console launcher. The probe addresses identify the
+**host**, as reached from the SSH probe machine; the IPv6 zone identifies that machine's network interface.
+The SSH probe uses the panel account's existing config and pinned host keys, without password prompts.
+
+The installer:
+- Refuses unknown launcher edits, existing unrelated PF policy and already-running experimental VNC processes.
+- Uses only `com.apple/000.proxmacs-console`, retaining its own `pfctl -E` reference. It never edits `/etc/pf.conf`.
+  If PF is disabled and completely empty, it can initialize the verified stock Apple configuration; active or
+  nonstandard empty-root configurations require manual review instead of a global reload.
+- Installs `org.proxmacs.console-pf` as a root LaunchDaemon, using system Python in isolated mode. Its files,
+  Root-owned backups and logs live in `/Library/Application Support/ProxmacsConsolePF`.
+- Proves both IP families using disposable wildcard TCP listeners: loopback must work, remote listeners owned
+  by the panel account must be reachable, and remote listeners owned by the VM account must be blocked.
+  An SSH failure does not count as successful isolation. Only then does it update the VM launcher.
+- Leaves console enable markers and running VMs untouched. On installation failure it restores the launcher
+  and removes its own PF rules/reference; diagnostics remain for inspection. An unchanged failed/rolled-back
+  installation can be retried with the same command; previous diagnostics are archived.
+
+At boot the supervisor waits up to 15 seconds for the PF monitor, then starts the VM **without VNC** if protection
+is unavailable. The monitor checks PF state, root anchor ordering, the exact owner rule and interface skipping.
+It does not overwrite policy changes detected while running. Its root-owned readiness record expires after six
+seconds, and the supervisor polls every half second. **Loss of protection during an active console forcibly stops
+that VM**, removes its credentials and creates the pause marker. This watchdog is not an atomic barrier against
+an administrator disabling PF: there is a detection interval. Stop console-enabled VMs before PF maintenance.
+Recovery is removing `.console-enabled` and resuming through the existing lifecycle tool.
+
+Verify the policy/probes again, or roll back **after stopping console-enabled VMs**:
+
+```bash
+sudo /usr/bin/python3 -I scripts/install-console-pf.py --verify
+sudo /usr/bin/python3 -I scripts/install-console-pf.py --rollback
+```
+
+Rollback checks for later launcher edits, restores the saved launcher/supervisor, unloads the monitor and releases
+only its own anchor and PF reference. It does not flush other rules/states or globally disable PF. Backups remain.
+The PF network tests require root and a real remote peer; unit tests below do not substitute for them.
+
+**Confirmed reconnect crash on the tested host build:** Tart 2.40.1 / macOS 27.2 beta (26B5091g)
+can terminate the guest on a new graphical VNC connection after the last client disconnects. Apple's
+VNC server registers the same accessor observer again and hits `Base::assertion_trap`. A direct RFB
+reproduction, with a ten-second gap and no Proxmacs/browser involved, produced the same SIGTRAP.
+Keeping one graphical client connected allowed five additional connect/disconnect cycles without a crash.
+The deployed supervisor subsequently passed 60 full graphical connections per guest through the panel's
+HTTPS/WebSocket bridge, including a panel restart, with unchanged Tart PIDs. These were protocol-level
+reload equivalents; an actual browser reload was not automated in that check.
+The supervisor now owns this persistent connection. This avoids the known zero-client transition while
+the anchor is healthy; it does not fix Apple's private framework or promise protection against other VNC
+bugs. See [evidence and limits](docs/vnc-reconnect-crash.md).
+
+For an existing PF installation, upgrade the supervisor without restarting PF or changing its rules:
+
+```bash
+sudo /usr/bin/python3 -I scripts/install-console-pf.py --update-runner
+```
+
+This checks the installed launcher/supervisor hashes, saves a root-owned backup, and updates the rollback
+metadata. Running supervisors keep the old code. Cleanly shut down and start each VM through its existing
+service controller, then verify the `persistent display connected` log before testing browser reconnects.
+Do not replace the process underneath an already-running Tart instance or remove the PF rules.
+Do not use raw VNC probes as health checks. The installer probes disposable TCP servers, not Apple VNC.
+
+
+The browser obtains current credentials through an authenticated, non-cacheable same-origin POST, then connects
+through the panel's WebSocket endpoint. Ports and passwords are not placed in URLs. The server verifies the
+endpoint PID against Tart's POSIX config lock and checks it again during a connection; logout or a replaced
+VM session closes the connection within two seconds. Only a current browser login with a matching Origin can
+use the graphical console. Reverse proxies must preserve the expected HTTPS scheme and Host; direct HTTPS is
+the supported deployment. Do not publish the raw VNC listener.
+
+Validation:
+
+```bash
+npm --prefix web ci
+npm --prefix web run build
+PROXMACS_HEADLESS=1 swift build -c release
+PROXMACS_HEADLESS=1 PROXMACS_SUPPORT_DIR=/tmp/proxmacs-tests-support TART_HOME=/tmp/proxmacs-tests-tart swift test -c release
+node --experimental-strip-types --test scripts/test-console-text.mjs scripts/test-console-input.mjs # Node 22.6+
+PYTHONDONTWRITEBYTECODE=1 python3 scripts/test-console-runner.py
+PYTHONDONTWRITEBYTECODE=1 python3 scripts/test-console-pf.py
+PYTHONDONTWRITEBYTECODE=1 python3 scripts/test-console-integration.py --binary /absolute/path/to/built/Proxmacs
+```
+
+The integration check creates and removes isolated storage and a loopback RFB fixture; no real VM is used.
+It checks login/Origin restrictions, WebSocket data flow, logout, stale endpoints, permissions and secret redaction.
+It also disconnects the supervisor anchor and verifies endpoint withdrawal, existing bridge closure, continued
+VM-process liveness, no pause marker, no retry and no guest input.
+The fixture also supports VNC password authentication and a colored framebuffer for manual noVNC/input checks.
+Full Swift tests need an Xcode installation with XCTest; some Command Line Tools distributions cannot run them.
+`PROXMACS_HEADLESS=1` excludes the native SwiftUI menu when its macros are unavailable; CLI and web UI remain usable.
+Third-party notices ship under `/licenses/novnc/` in the web assets.
