@@ -310,7 +310,14 @@ are not implemented. Linux VMs retain the upstream lifecycle and serial console.
 ### Graphical Console
 
 The macOS Console tab embeds [noVNC](https://novnc.com/): keyboard and mouse control are enabled by default,
-with optional view-only mode, fit-to-window, fullscreen, Command-Space and reconnect controls.
+with a compact toolbar, view-only mode, fit/actual-size scaling, fullscreen and reconnect controls.
+Type clipboard reads text on the browser device after a click, then previews it hidden by default.
+If clipboard access is denied, paste manually with Command-V (Mac) or Control-V. Select the destination
+field in the guest first. The confirmed text is sent as individual key events; Enter is never appended.
+Line breaks and Tab require an explicit opt-in because they can submit forms or move focus.
+Stop cancels remaining characters; it cannot undo characters already sent. Switching VM, disconnecting
+or hiding the page cancels the queue; it is never replayed after reconnect. Text is not saved or logged.
+Unicode and keyboard-layout compatibility depend on the Apple VNC server and must be verified in the guest.
 It uses Tart's **experimental** `--vnc-experimental` display server, not guest Screen Sharing.
 Compatibility depends on Apple's private VNC implementation; verify it before relying on recovery access.
 
@@ -423,6 +430,7 @@ npm --prefix web ci
 npm --prefix web run build
 PROXMACS_HEADLESS=1 swift build -c release
 PROXMACS_HEADLESS=1 PROXMACS_SUPPORT_DIR=/tmp/proxmacs-tests-support TART_HOME=/tmp/proxmacs-tests-tart swift test -c release
+node --experimental-strip-types --test scripts/test-console-text.mjs # Node 22.6+
 PYTHONDONTWRITEBYTECODE=1 python3 scripts/test-console-runner.py
 PYTHONDONTWRITEBYTECODE=1 python3 scripts/test-console-pf.py
 PYTHONDONTWRITEBYTECODE=1 python3 scripts/test-console-integration.py --binary /absolute/path/to/built/Proxmacs
