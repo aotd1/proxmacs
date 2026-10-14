@@ -13,7 +13,7 @@ import subprocess
 import tempfile
 
 
-def transform(source, runner, python, reader):
+def transform(source, runner, python, reader, firewall_status=None):
     old = 'exec "$TART_BIN" run '
     new = (f'exec {shlex.quote(python)} {shlex.quote(str(runner))} --reader {shlex.quote(reader)} '
            '--state-dir "$TART_HOME/vms/$1/.proxmacs-console" --pause-file "$TART_HOME/vms/$1/.paused" --enable-file "$TART_HOME/vms/$1/.console-enabled" -- "$TART_BIN" run ')
@@ -21,6 +21,8 @@ def transform(source, runner, python, reader):
         raise ValueError('Console supervisor already installed; use --rollback before replacing it')
     if old not in source or 'TART_HOME=' not in source:
         raise ValueError('Unrecognized launcher; review it manually before installing a supervisor')
+    if firewall_status:
+        new = new.replace(' -- "$TART_BIN" run ', f' --firewall-status {shlex.quote(str(firewall_status))} -- "$TART_BIN" run ')
     return source.replace(old, new)
 
 

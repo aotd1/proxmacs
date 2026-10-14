@@ -10,7 +10,10 @@ import pathlib
 import pty
 import pwd
 import re
+import select
 import signal
+import stat
+import time
 import subprocess
 import sys
 import tempfile
@@ -32,6 +35,41 @@ def endpoint(line, pid):
 def loopback_only(output, port):
     addresses = [line[1:] for line in output.splitlines() if line.startswith('n') and line.endswith(':' + str(port))]
     return bool(addresses) and all(value in ('127.0.0.1:' + str(port), '[::1]:' + str(port)) for value in addresses)
+
+
+
+def firewall_ready(path, uid=None):
+    """Accept only a fresh root-owned health record in a protected directory."""
+    if path is None:
+        return False
+    try:
+        path = pathlib.Path(path)
+        if not path.is_absolute():
+            return False
+        for parent in path.parents:
+            info = parent.lstat()
+            if stat.S_ISLNK(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022:
+                return False
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        with os.fdopen(fd) as stream:
+            info = os.fstat(stream.fileno())
+            if not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022 or info.st_size > 1024:
+                return False
+            data = json.load(stream)
+        age = time.monotonic() - data['monotonic']
+        if data['uid'] != (os.getuid() if uid is None else uid) or not 0 <= age < 6 or data['pid'] <= 1:
+            return False
+        try:
+            os.kill(data['pid'], 0)
+        except PermissionError:
+            pass  # Root monitor is alive, but this account cannot signal it.
+        return True
+    except (OSError, ValueError, KeyError, TypeError):
+        return False
+
+
+def listener_present(output, port):
+    return any(line.startswith('n') and line.endswith(':' + str(port)) for line in output.splitlines())
 
 
 def protect(path, reader, directory=False):
@@ -58,6 +96,7 @@ def main():
     parser.add_argument('--reader', required=True)
     parser.add_argument('--pause-file', type=pathlib.Path)
     parser.add_argument('--enable-file', type=pathlib.Path)
+    parser.add_argument('--firewall-status', type=pathlib.Path)
     parser.add_argument('command', nargs=argparse.REMAINDER)
     args = parser.parse_args()
     pwd.getpwnam(args.reader)
@@ -67,6 +106,15 @@ def main():
     if args.enable_file and not args.enable_file.exists():
         (args.state_dir / 'session.json').unlink(missing_ok=True)
         os.execv(command[0], command)
+    if args.firewall_status:
+        for _ in range(30):
+            if firewall_ready(args.firewall_status):
+                break
+            time.sleep(0.5)  # Allow the independent system PF job to become ready at boot.
+    if args.firewall_status and not firewall_ready(args.firewall_status):
+        (args.state_dir / 'session.json').unlink(missing_ok=True)
+        print('proxmacs: PF protection unavailable; starting VM without console', flush=True)
+        os.execv(command[0], [item for item in command if item != '--vnc-experimental'])
     if '--vnc' in command:
         parser.error('Guest Screen Sharing cannot be combined with the graphical console')
     if '--vnc-experimental' not in command:
@@ -90,8 +138,17 @@ def main():
         signal.signal(sig, lambda signum, frame: child.send_signal(signum) if child.poll() is None else None)
     buffer = b''
     unsafe = False
+    protection_lost = False
     try:
         while True:
+            if args.firewall_status and not firewall_ready(args.firewall_status):
+                protection_lost = True
+                raise RuntimeError('PF protection lost')
+            readable, _, _ = select.select([master], [], [], 0.5)
+            if not readable:
+                if child.poll() is not None:
+                    break
+                continue
             try:
                 chunk = os.read(master, 16384)
             except OSError:
@@ -104,9 +161,10 @@ def main():
                 line = raw.decode('utf-8', errors='replace').rstrip('\r')
                 record = endpoint(line, child.pid)
                 if record:
-                    listeners = subprocess.run(['/usr/sbin/lsof', '-nP', '-a', '-p', str(child.pid), '-iTCP', '-sTCP:LISTEN', '-Fn'], capture_output=True, text=True, check=True)
-                    if not loopback_only(listeners.stdout, record['port']):
-                        # Never publish an externally reachable VNC console.
+                    listeners = subprocess.run(['/usr/sbin/lsof', '-nP', '-a', '-p', str(child.pid), '-iTCP', '-sTCP:LISTEN', '-Fn'], capture_output=True, text=True, check=True, timeout=5)
+                    protected = firewall_ready(args.firewall_status) if args.firewall_status else loopback_only(listeners.stdout, record['port'])
+                    if not listener_present(listeners.stdout, record['port']) or not protected:
+                        # Wildcard sockets require the continuously monitored root PF policy.
                         unsafe = True
                         raise RuntimeError('Console listener is not restricted to loopback')
                     publish(directory, args.reader, record)
@@ -117,14 +175,18 @@ def main():
                 buffer = b''  # Never forward an unbounded or incomplete credential-bearing line.
         return child.wait()
     except Exception:
+        state.unlink(missing_ok=True)
         if args.pause_file:
             try:
                 args.pause_file.touch(mode=0o660)  # Prevent a KeepAlive restart loop after unsafe console startup.
             except OSError:
                 print('proxmacs: unable to pause the system launcher', file=sys.stderr)
-        print('proxmacs: console supervisor failed' + (' (non-loopback listener)' if unsafe else ''), file=sys.stderr)
+        print('proxmacs: console supervisor failed' + (' (PF protection lost)' if protection_lost else ' (unprotected listener)' if unsafe else ''), file=sys.stderr)
         if child.poll() is None:
-            child.terminate()
+            if protection_lost:
+                child.kill()  # Do not leave raw VNC alive while waiting for guest shutdown.
+            else:
+                child.terminate()
             try:
                 child.wait(timeout=15)
             except subprocess.TimeoutExpired:
