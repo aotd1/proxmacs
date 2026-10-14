@@ -314,6 +314,14 @@ with optional view-only mode, fit-to-window, fullscreen, Command-Space and recon
 It uses Tart's **experimental** `--vnc-experimental` display server, not guest Screen Sharing.
 Compatibility depends on Apple's private VNC implementation; verify it before relying on recovery access.
 
+**Real-host compatibility blocker:** with Tart 2.40.1 on macOS 27.2 beta (26B5091g), the Apple VNC server
+binds a wildcard address (`*:port`) even though Tart prints a localhost URL. The supervisor correctly refuses
+to publish that endpoint and pauses/stops the guest. This was reproduced separately without a VM. The current
+loopback-only deployment therefore does **not** provide a usable graphical console on that configuration.
+Do not remove the listener check to enable it. Keep `.console-enabled` absent until an enforced local-only
+transport or separately reviewed host firewall integration is implemented and verified. If a pilot was paused,
+remove its marker and resume it using the existing lifecycle tool; ordinary VM operation remains available.
+
 `scripts/console-runner.py` supervises Tart as the existing VM owner, captures its VNC URL before it reaches logs,
 checks that the VNC port listens exclusively on loopback, and publishes a per-boot endpoint with mode 0600 and
 an ACL granting the panel account read access. Credentials are removed when Tart exits. An unsafe listener or
