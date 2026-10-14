@@ -314,6 +314,7 @@ fieldset { border: none; padding: 0; margin: 0; min-width: 0; }
 .kv { display: grid; grid-template-columns: minmax(110px, 150px) minmax(0, 1fr); gap: 8px 16px; align-items: baseline; margin: 0; }
 .kv > dt { color: var(--muted); }
 .kv > dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+.web-urls { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
 .copy-line { display: inline-flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .copy-line code { overflow-wrap: anywhere; background: var(--panel-alt); border: 1px solid var(--border); border-radius: 4px; padding: 2px 6px; }
 .grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 340px), 1fr)); gap: 0 16px; }

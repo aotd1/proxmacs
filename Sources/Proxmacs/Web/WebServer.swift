@@ -67,7 +67,7 @@ final class WebServer {
         router.add(middleware: SecurityHeadersMiddleware(webSocketScheme: settings.tls ? "wss" : "ws"))
         router.add(middleware: AuthMiddleware())
         router.add(middleware: FileMiddleware(assetsDirectory(), searchForIndexHtml: true))
-        WebAPI(state: state, secureCookies: settings.tls).register(on: router)
+        WebAPI(state: state, settings: settings).register(on: router)
 
         let configuration = ApplicationConfiguration(address: .hostname(settings.bind, port: settings.port), serverName: "Proxmacs")
         guard settings.tls else {

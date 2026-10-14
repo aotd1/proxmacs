@@ -26,6 +26,15 @@ export function HostSummary({ navigate }: { navigate: Navigate }) {
             ['Tart', host.tartVersion ?? <Badge kind="err">not found</Badge>],
             ['CPUs', String(host.cpus ?? '—')],
             load.length === 3 && ['Load average', <span className="mono">{load.map((l) => l.toFixed(2)).join('  ')}</span>],
+            !!host.web?.urls.length && ['Web UI', <ul className="web-urls">
+              {host.web.urls.map((u) => (
+                <li key={u.url}>
+                  <a className="mono" href={u.url}>{u.url}</a>
+                  {u.url === window.location.origin && <> <Badge kind="info">this page</Badge></>}
+                  <div className="muted small">{[u.name, u.device].filter(Boolean).join(' · ')}</div>
+                </li>
+              ))}
+            </ul>],
             ...(storage ? (['vms', 'backups'] as const).map((kind) => {
               const loc = storage[kind];
               const v = loc.volume;

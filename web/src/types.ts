@@ -73,6 +73,14 @@ export interface Host {
   osVersion: string;
   diskFreeBytes: number;
   diskTotalBytes: number;
+  web?: { bind: string; port: number; urls: WebURL[] };
+}
+
+export interface WebURL {
+  url: string;
+  address: string;
+  device: string;
+  name: string | null;
 }
 
 export interface Volume {

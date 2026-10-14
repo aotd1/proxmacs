@@ -6,7 +6,9 @@ import NIOCore
 /// JSON API used by the browser UI (React app in web/, types in web/src/types.ts).
 struct WebAPI: Sendable {
     let state: AppState
-    var secureCookies = true
+    /// The settings the server runs with (web.json may have changed since).
+    var settings = WebSettings()
+    var secureCookies: Bool { settings.tls }
 
     func register(on router: Router<WebContext>) {
         registerAuth(router)
@@ -49,11 +51,38 @@ struct WebAPI: Sendable {
 
     // MARK: Host
 
+    /// Where the web UI can be reached: one URL per address it listens on, the default route's interface
+    /// first and loopback last.
+    private static func listeningURLs(_ settings: WebSettings) async -> [[String: Any]] {
+        let ports = Dictionary(await NetworkInterfaces.list().map { ($0.device, $0.name) }, uniquingKeysWith: { a, _ in a })
+        let primary = await NetworkInterfaces.defaultRoute()
+        func rank(_ a: HostAddress) -> Int {
+            if a.device == primary { return 0 }
+            if ports[a.device] != nil { return 1 }
+            return a.device.hasPrefix("lo") ? 3 : 2
+        }
+        return NetworkInterfaces.listening(on: settings.bind)
+            .enumerated().sorted { (rank($0.element), $0.offset) < (rank($1.element), $1.offset) }
+            .map(\.element)
+            .map { address in
+                let host = address.ipv6 ? "[\(address.address)]" : address.address
+                let name = ports[address.device] ?? (address.device.hasPrefix("lo") ? "Loopback" : nil)
+                return [
+                    "url": "\(settings.scheme)://\(host):\(settings.port)",
+                    "address": address.address,
+                    "device": address.device,
+                    "name": name as Any? ?? NSNull(),
+                ]
+            }
+    }
+
     private func registerHost(_ router: Router<WebContext>) {
         let state = self.state
+        let settings = self.settings
         router.get("/api/host") { _, _ in
             let values = try? Paths.home.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey, .volumeTotalCapacityKey])
             let tartVersion = await state.tartVersion
+            let listening = await Self.listeningURLs(settings)
             return API.json([
                 "hostname": ProcessInfo.processInfo.hostName,
                 "tartVersion": tartVersion as Any? ?? NSNull(),
@@ -62,6 +91,7 @@ struct WebAPI: Sendable {
                 "osVersion": ProcessInfo.processInfo.operatingSystemVersionString,
                 "diskFreeBytes": values?.volumeAvailableCapacityForImportantUsage ?? 0,
                 "diskTotalBytes": values?.volumeTotalCapacity ?? 0,
+                "web": ["bind": settings.bind, "port": settings.port, "urls": listening],
             ])
         }
         router.get("/api/host/stats") { _, _ in

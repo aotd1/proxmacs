@@ -151,7 +151,8 @@ $P cli web-passwd                # or Proxmacs menu → Web UI → Set Password�
 $P cli serve                     # headless, without the menubar
 ```
 
-Settings live in `web.json` (`enabled`, `port` 8006, `bind` 0.0.0.0, `tls` true). The self-signed certificate's
+Settings live in `web.json` (`enabled`, `port` 8006, `bind` 0.0.0.0, `tls` true). Host → Summary lists every
+address the web UI listens on. The self-signed certificate's
 SHA-256 fingerprint is printed by `serve`, so you can check it against the browser warning.
 
 **Install as an app**: on iPhone/iPad, Safari → Share → Add to Home Screen; on Android or desktop Chrome/Edge, the
