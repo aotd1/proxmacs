@@ -43,7 +43,8 @@ def lines(text):
 def root_rules_safe(text):
     # Reject unknown root policy rather than risk an earlier quick-pass bypass.
     filtered = [line for line in lines(text) if not line.startswith('scrub-anchor ')]
-    return filtered == ['anchor "com.apple/*" all']
+    return filtered in (['anchor "com.apple/*" all'],
+                        ['anchor "com.apple/*" all', 'anchor "com.apple.internet-sharing" all'])
 
 
 def anchor_rules_safe(text, uid, username):
@@ -177,7 +178,7 @@ def monitor(config):
         while not stopping:
             try:
                 check(config)
-                atomic_json(READY, {'uid': config['uid'], 'pid': os.getpid(), 'monotonic': time.monotonic()}, 0o644)
+                atomic_json(READY, {'uid': config['uid'], 'pid': os.getpid(), 'monotonic': time.clock_gettime(time.CLOCK_MONOTONIC_RAW)}, 0o644)
                 state = 'protection ready'
             except Exception:
                 READY.unlink(missing_ok=True)

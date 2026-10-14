@@ -244,6 +244,8 @@ def main():
         plist = {'Label': LABEL, 'ProgramArguments': ['/usr/bin/python3', '-I', str(policy.BASE / 'console-pf.py'), 'monitor'],
                  'RunAtLoad': True, 'KeepAlive': True, 'ThrottleInterval': 10, 'Umask': 0o077,
                  'StandardOutPath': str(policy.BASE / 'monitor.log'), 'StandardErrorPath': str(policy.BASE / 'monitor-error.log')}
+        for log in ['monitor.log', 'monitor-error.log']:
+            write_root(policy.BASE / log, b'', 0o644)  # Diagnostics contain no VM/VNC credentials.
         write_root(PLIST, plistlib.dumps(plist), 0o644)
         policy.command(['/bin/launchctl', 'bootstrap', 'system', str(PLIST)])
         for _ in range(15):
@@ -257,6 +259,12 @@ def main():
         write_root(runner, (HERE / 'console-runner.py').read_bytes(), 0o755)
         installed_launcher = True
         write_root(path, updated.encode(), 0o755)
+        # Python <=3.9 on macOS has a process-relative time.monotonic(). Verify
+        # the actual service interpreter/account can read the shared-clock record.
+        subprocess.run([args.python, '-I', '-c',
+                        'import runpy,sys; m=runpy.run_path(sys.argv[1]); sys.exit(0 if m["firewall_ready"](sys.argv[2]) else 1)',
+                        str(runner), str(policy.READY)], check=True, capture_output=True, text=True, timeout=10,
+                       cwd='/private/tmp', preexec_fn=drop_to(owner), env={'PATH': '/usr/bin:/bin', 'HOME': owner.pw_dir})
         config['installed_hashes'] = {str(item): digest(item) for item in [path, runner]}
         policy.atomic_json(policy.CONFIG, config)
         print('PF protection and launcher installed. Console markers unchanged; no VM restarted.')
@@ -270,6 +278,9 @@ def main():
         except Exception:
             print('PF cleanup needs inspection; protection was not globally disabled.', file=sys.stderr)
         PLIST.unlink(missing_ok=True)
+        diagnostic = policy.BASE / 'monitor-error.log'
+        if diagnostic.exists():
+            print('\n'.join(diagnostic.read_text(errors='replace').splitlines()[-18:]), file=sys.stderr)
         print('Installation failed. Existing VM launcher restored; diagnostic files retained at ' + str(policy.BASE), file=sys.stderr)
         raise
 

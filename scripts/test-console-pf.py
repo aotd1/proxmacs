@@ -46,6 +46,8 @@ class PolicyTests(unittest.TestCase):
 
     def test_earlier_root_pass_is_rejected(self):
         self.assertTrue(policy.root_rules_safe('scrub-anchor "com.apple/*" all fragment reassemble\nanchor "com.apple/*" all\n'))
+        self.assertTrue(policy.root_rules_safe('anchor "com.apple/*" all\nanchor "com.apple.internet-sharing" all\n'))
+        self.assertFalse(policy.root_rules_safe('anchor "com.apple.internet-sharing" all\nanchor "com.apple/*" all\n'))
         for text in ['', 'anchor "other/*" all', 'pass quick all\nanchor "com.apple/*" all', 'anchor "com.apple/*" on lo0 all']:
             self.assertFalse(policy.root_rules_safe(text))
 
@@ -91,6 +93,14 @@ class PolicyTests(unittest.TestCase):
                 self.assertEqual(pf.call_args_list, [mock.call('-a', policy.ANCHOR, '-F', 'rules'), mock.call('-X', '12345')])
             self.assertFalse(token.exists()); self.assertFalse(ready.exists())
 
+    @unittest.skipUnless(sys.platform == 'darwin', 'macOS clock')
+    def test_raw_monotonic_clock_is_shared_with_system_python(self):
+        before = time.clock_gettime(time.CLOCK_MONOTONIC_RAW)
+        value = float(subprocess.check_output(['/usr/bin/python3', '-I', '-c', 'import time; print(time.clock_gettime(time.CLOCK_MONOTONIC_RAW))'], text=True))
+        after = time.clock_gettime(time.CLOCK_MONOTONIC_RAW)
+        self.assertLessEqual(before, value)
+        self.assertLessEqual(value, after)
+
     def test_unprivileged_or_missing_status_cannot_authorize_wildcard(self):
         self.assertFalse(runner.firewall_ready(None))
         self.assertFalse(runner.firewall_ready('relative.json'))
@@ -105,7 +115,7 @@ class PolicyTests(unittest.TestCase):
         file_info = types.SimpleNamespace(st_mode=stat.S_IFREG | 0o644, st_uid=0, st_size=100)
         class Stream(io.StringIO):
             def fileno(self): return 42
-        with mock.patch.object(pathlib.Path, 'lstat', return_value=directory_info), mock.patch.object(runner.os, 'open', return_value=42), mock.patch.object(runner.os, 'fdopen', side_effect=lambda *a: Stream(json.dumps(data))), mock.patch.object(runner.os, 'fstat', return_value=file_info), mock.patch.object(runner.os, 'kill') as kill, mock.patch.object(runner.time, 'monotonic', return_value=101):
+        with mock.patch.object(pathlib.Path, 'lstat', return_value=directory_info), mock.patch.object(runner.os, 'open', return_value=42), mock.patch.object(runner.os, 'fdopen', side_effect=lambda *a: Stream(json.dumps(data))), mock.patch.object(runner.os, 'fstat', return_value=file_info), mock.patch.object(runner.os, 'kill') as kill, mock.patch.object(runner.time, 'clock_gettime', return_value=101):
             self.assertTrue(runner.firewall_ready('/protected/ready.json', 503))
             self.assertFalse(runner.firewall_ready('/protected/ready.json', 504))
             for timestamp in [95.0, 102.0, float('nan')]:

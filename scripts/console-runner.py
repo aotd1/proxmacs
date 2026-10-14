@@ -56,7 +56,7 @@ def firewall_ready(path, uid=None):
             if not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022 or info.st_size > 1024:
                 return False
             data = json.load(stream)
-        age = time.monotonic() - data['monotonic']
+        age = time.clock_gettime(time.CLOCK_MONOTONIC_RAW) - data['monotonic']
         if data['uid'] != (os.getuid() if uid is None else uid) or not 0 <= age < 6 or data['pid'] <= 1:
             return False
         try:

@@ -346,7 +346,7 @@ Never use the upstream uninstall script against these existing services.
 #### Optional PF protection for wildcard Apple VNC
 
 This deployment needs a **dedicated VM service account**, a different panel account, stock Apple root PF anchor
-layout, and an SSH-accessible machine on the same network for IPv4/IPv6 probes. The PF rule blocks new inbound TCP
+layout (including a trailing Apple Internet Sharing anchor), and an SSH-accessible machine on the same network for IPv4/IPv6 probes. The PF rule blocks new inbound TCP
 connections to sockets owned by that account on every interface except `lo0`. It has no port number, so it is in
 place before Tart allocates a random VNC port. The SYN filter preserves replies to outbound host connections;
 forwarded guest traffic has no matching local socket owner. Guest network access must still be verified after installation.
