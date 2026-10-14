@@ -179,6 +179,17 @@ function Content({ route, navigate }: { route: Route; navigate: Navigate }) {
   const tabs = app.host?.monitorOnly ? ([['summary', 'Summary']] as const) : route.type === 'vm' ? (app.vm(route.name)?.external ? MAC_TABS : VM_TABS) : HOST_TABS;
   const vm = route.type === 'vm' ? app.vm(route.name) : null;
   const full = route.type === 'vm' && route.tab === 'console';
+  const graphical = full && vm?.external && vm.macOS ? vm.name : null;
+  // Apple VNC can crash Tart on reconnect. Navigation must retain each visited session.
+  const [visited, setVisited] = useState<string[]>([]);
+  const consoles = graphical && !visited.includes(graphical) ? [...visited, graphical] : visited;
+  useEffect(() => {
+    setVisited(previous => {
+      const next = previous.filter(name => app.vms.some(v => v.name === name && v.external && v.macOS));
+      if (graphical && !next.includes(graphical)) next.push(graphical);
+      return next.length === previous.length && next.every((name, i) => name === previous[i]) ? previous : next;
+    });
+  }, [graphical, app.vms]);
 
   let body: ReactNode = null;
   if (route.type === 'host') {
@@ -196,7 +207,7 @@ function Content({ route, navigate }: { route: Route; navigate: Navigate }) {
       hardware: <HardwareView {...props} />,
       cloudinit: <CloudInitView {...props} />,
       options: <OptionsView vm={vm} />,
-      console: <Suspense fallback={<Loading />}>{vm.external && vm.macOS ? <GraphicalConsoleView vm={vm} /> : <ConsoleView vm={vm} />}</Suspense>,
+      console: <Suspense fallback={<Loading />}>{!graphical && <ConsoleView vm={vm} />}</Suspense>,
       backups: <BackupsView {...props} />,
       offsite: <OffsiteView {...props} />,
     }[route.tab] ?? <VMSummary {...props} />;
@@ -223,10 +234,21 @@ function Content({ route, navigate }: { route: Route; navigate: Navigate }) {
           </button>
         ))}
       </div>
-      {/* Keyed so each VM/tab gets fresh view state. */}
-      <div key={routeHash(route)} className={`content-body${full ? ' full' : ''}`} role="tabpanel">
+      {/* Ordinary tabs get fresh state; visited graphical consoles survive navigation. */}
+      {!graphical && <div key={routeHash(route)} className={`content-body${full ? ' full' : ''}`} role="tabpanel">
         <div className="view">{body}</div>
-      </div>
+      </div>}
+      {consoles.map(name => {
+        const consoleVM = app.vm(name);
+        if (!consoleVM?.external || !consoleVM.macOS) return null;
+        const active = graphical === name;
+        return <div key={`graphical:${name}`} className="content-body full" role="tabpanel"
+          hidden={!active} inert={!active} style={active ? undefined : { display: 'none' }}>
+          <div className="view"><Suspense fallback={<Loading />}>
+            <GraphicalConsoleView vm={consoleVM} active={active} />
+          </Suspense></div>
+        </div>;
+      })}
     </>
   );
 }

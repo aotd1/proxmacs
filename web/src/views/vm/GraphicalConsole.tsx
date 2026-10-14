@@ -1,13 +1,17 @@
 import RFB from '@novnc/novnc';
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { api, enc, errorMessage } from '../../api';
 import { Badge } from '../../components/ui';
 import type { VM } from '../../types';
 import { textKeys, typeKeys } from './consoleText';
+import { trackConsoleKeys } from './consoleInput';
 
 // Keep pinned noVNC's default warning-only logging: info/debug includes password keysyms.
 
-export function GraphicalConsoleView({ vm }: { vm: VM }) {
+export function GraphicalConsoleView({ vm, active }: { vm: VM; active: boolean }) {
+  const activeRef = useRef(active);
+  activeRef.current = active;
+  const releaseKeys = useRef<(() => void) | null>(null);
   const host = useRef<HTMLDivElement>(null);
   const box = useRef<HTMLDivElement>(null);
   const dialog = useRef<HTMLDialogElement>(null);
@@ -59,7 +63,8 @@ export function GraphicalConsoleView({ vm }: { vm: VM }) {
         const scheme = location.protocol === 'https:' ? 'wss:' : 'ws:';
         rfb = new RFB(host.current, `${scheme}//${location.host}/api/vms/${enc(vm.name)}/console/vnc`, { credentials, shared: true });
         client.current = rfb;
-        rfb.scaleViewport = fit; rfb.viewOnly = viewOnly; rfb.resizeSession = false; rfb.focusOnClick = true;
+        releaseKeys.current = trackConsoleKeys(rfb);
+        rfb.scaleViewport = fit; rfb.viewOnly = viewOnly || !activeRef.current; rfb.resizeSession = false; rfb.focusOnClick = true;
         rfb.addEventListener('connect', () => {
           if (!disposed) { setConnected(true); setStatus('Connected'); }
         });
@@ -77,14 +82,19 @@ export function GraphicalConsoleView({ vm }: { vm: VM }) {
         });
       } catch (error) { if (!disposed) setStatus(errorMessage(error)); }
     })();
-    return () => { disposed = true; generation.current++; interrupt(); rfb?.disconnect(); client.current = null; };
+    return () => { disposed = true; generation.current++; interrupt(); releaseKeys.current?.(); releaseKeys.current = null; rfb?.disconnect(); client.current = null; };
   }, [vm.name, vm.state, attempt]);
 
   useEffect(() => { if (client.current) client.current.scaleViewport = fit; }, [fit, connected]);
-  useEffect(() => {
-    if (viewOnly) { interrupt(); closePaste(); }
-    if (client.current) client.current.viewOnly = viewOnly;
-  }, [viewOnly, connected]);
+  useLayoutEffect(() => {
+    if (viewOnly || !active) {
+      interrupt(); closePaste(); setFocused(false);
+      // Release held keys before noVNC's viewOnly setter starts discarding key-up events.
+      releaseKeys.current?.();
+      client.current?.blur();
+    }
+    if (client.current) client.current.viewOnly = viewOnly || !active;
+  }, [active, viewOnly, connected]);
   useEffect(() => {
     const change = () => setFullscreen(document.fullscreenElement === box.current);
     const suspend = () => { interrupt(); closePaste(); };
@@ -101,7 +111,7 @@ export function GraphicalConsoleView({ vm }: { vm: VM }) {
   }, []);
 
   const openPaste = async () => {
-    if (!connected || viewOnly || transfer.current) return;
+    if (!active || !connected || viewOnly || transfer.current) return;
     clearDraft(); setNotice(''); dialog.current?.showModal();
     const request = clipboardRequest.current;
     try {
@@ -117,7 +127,7 @@ export function GraphicalConsoleView({ vm }: { vm: VM }) {
 
   const sendText = async () => {
     const rfb = client.current;
-    if (!rfb || !connected || viewOnly || transfer.current) return;
+    if (!active || !rfb || !connected || viewOnly || transfer.current) return;
     let keys: number[];
     try { keys = textKeys(text, controls); }
     catch (error) { setPasteHint(errorMessage(error)); return; }

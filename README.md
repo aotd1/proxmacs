@@ -311,6 +311,11 @@ are not implemented. Linux VMs retain the upstream lifecycle and serial console.
 
 The macOS Console tab embeds [noVNC](https://novnc.com/): keyboard and mouse control are enabled by default,
 with a compact toolbar, view-only mode, fit/actual-size scaling, fullscreen and reconnect controls.
+Visited graphical consoles stay connected when navigating between VMs or other tabs. Hidden consoles
+are inert and view-only; leaving one cancels clipboard typing, clears the draft and releases held keys.
+Logging out or closing/reloading the page still closes these connections. This avoids navigation-driven
+reconnects but is not a fix for Apple's experimental VNC crashes; refresh, Reconnect and multiple browser
+windows can still reach that server bug.
 Type clipboard reads text on the browser device after a click, then previews it hidden by default.
 If clipboard access is denied, paste manually with Command-V (Mac) or Control-V. Select the destination
 field in the guest first. The confirmed text is sent as individual key events; Enter is never appended.
@@ -411,7 +416,10 @@ The PF network tests require root and a real remote peer; unit tests below do no
 This remains an experimental Apple display server. During a real deployment on Tart 2.40.1 / macOS 27.2 beta
 (26B5091g), a raw TCP/RFB diagnostic connection coincided with a Tart SIGTRAP in Apple's
 `_VZVirtualMachineAccessor addAccessorObserver:` / `_VZVNCServer _setupVirtualMachineAccessor`.
-A subsequent occurrence of the same Apple assertion was observed without an intentional raw VNC probe.
+The same assertion recurred seven times while switching consoles in the browser. Each navigation previously
+unmounted noVNC and created a fresh TCP connection on return. A separate direct authenticated RFB test
+also crashed the Apple server, but in `receive_client_message_set_encodings` with a raw-only encoding
+list: this is a different signature and does not establish the reconnect assertion's exact cause.
 The guest service restarted automatically. The exact trigger and concurrent-viewer behavior
 have not been established; do not treat this as a production stability guarantee or use raw VNC banner probes
 as a health check. The installer probes disposable TCP servers, not the running Apple VNC server.
@@ -431,7 +439,7 @@ npm --prefix web ci
 npm --prefix web run build
 PROXMACS_HEADLESS=1 swift build -c release
 PROXMACS_HEADLESS=1 PROXMACS_SUPPORT_DIR=/tmp/proxmacs-tests-support TART_HOME=/tmp/proxmacs-tests-tart swift test -c release
-node --experimental-strip-types --test scripts/test-console-text.mjs # Node 22.6+
+node --experimental-strip-types --test scripts/test-console-text.mjs scripts/test-console-input.mjs # Node 22.6+
 PYTHONDONTWRITEBYTECODE=1 python3 scripts/test-console-runner.py
 PYTHONDONTWRITEBYTECODE=1 python3 scripts/test-console-pf.py
 PYTHONDONTWRITEBYTECODE=1 python3 scripts/test-console-integration.py --binary /absolute/path/to/built/Proxmacs

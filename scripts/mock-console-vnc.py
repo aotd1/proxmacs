@@ -27,6 +27,8 @@ def recv(sock, count):
 
 
 def client(sock):
+    with (ROOT/'events.jsonl').open('a') as stream:
+        stream.write(json.dumps(dict(type='connect'))+'\n')
     try:
         sock.sendall(b'RFB 003.008\n')
         recv(sock, 12)
@@ -79,6 +81,8 @@ def client(sock):
         pass
     finally:
         sock.close()
+        with (ROOT/'events.jsonl').open('a') as stream:
+            stream.write(json.dumps(dict(type='disconnect'))+'\n')
 
 
 with (ROOT/'config.json').open('r+') as lock:
