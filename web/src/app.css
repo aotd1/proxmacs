@@ -366,6 +366,8 @@ fieldset { border: none; padding: 0; margin: 0; min-width: 0; }
 .task-status { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
 .task-status.ok { color: var(--ok); font-weight: 600; }
 .task-status.error { color: var(--err); font-weight: 600; }
+.image-progress { min-width: 160px; }
+.image-progress .task-status { white-space: normal; }
 
 /* modal */
 .modal.wide { width: 720px; }

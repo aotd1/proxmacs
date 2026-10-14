@@ -12,8 +12,10 @@ struct NewVMView: View {
     @State private var bridged = true
     @State private var interface = ""
     @State private var interfaces: [HostInterface] = []
-    @State private var useLocalImage = false
+    /// A catalog id, the name of an imported image, or `localFile`.
+    @State private var image = ImageCatalog.defaultID
     @State private var localImage: URL?
+    @State private var user = "debian"
     @State private var password = ""
     @State private var autostart = false
     @State private var startNow = true
@@ -21,6 +23,8 @@ struct NewVMView: View {
     @State private var creating = false
     @State private var error: String?
 
+    private static let localFile = "local-file"
+    private let imported = ImageStore.imported().map(\.lastPathComponent)
     private let maxCPUs = ProcessInfo.processInfo.activeProcessorCount
     private let memoryChoices = [1024, 2048, 4096, 8192, 16384]
 
@@ -50,11 +54,22 @@ struct NewVMView: View {
             }
 
             Section("Image") {
-                Picker("Source", selection: $useLocalImage) {
-                    Text("Debian 13 arm64 (download)").tag(false)
-                    Text("Local .qcow2 / .raw").tag(true)
+                Picker("Source", selection: $image) {
+                    ForEach(ImageCatalog.all, id: \.id) { catalog in
+                        Text(FileManager.default.fileExists(atPath: catalog.raw.path) ? catalog.name : "\(catalog.name) (download)").tag(catalog.id)
+                    }
+                    if !imported.isEmpty {
+                        Divider()
+                        ForEach(imported, id: \.self) { Text($0).tag($0) }
+                    }
+                    Divider()
+                    Text("Local .qcow2 / .raw…").tag(Self.localFile)
                 }
-                if useLocalImage {
+                .onChange(of: image) { old, new in
+                    // Follow the distribution's default user unless it was changed by hand.
+                    if user == ImageCatalog.find(old)?.user ?? "debian" { user = ImageCatalog.find(new)?.user ?? user }
+                }
+                if image == Self.localFile {
                     HStack {
                         Text(localImage?.lastPathComponent ?? "No file selected").foregroundStyle(.secondary)
                         Spacer()
@@ -64,8 +79,9 @@ struct NewVMView: View {
             }
 
             Section("Access") {
-                SecureField("Console password for 'debian' (optional)", text: $password)
-                Text("SSH keys from ~/.ssh/*.pub are installed for user 'debian'.")
+                TextField("User", text: $user)
+                SecureField("Console password for '\(user)' (optional)", text: $password)
+                Text("SSH keys from ~/.ssh/*.pub are installed for user '\(user)'.")
                     .font(.caption).foregroundStyle(.secondary)
                 Toggle("Start on login", isOn: $autostart)
                 Toggle("Start after creating", isOn: $startNow)
@@ -87,7 +103,7 @@ struct NewVMView: View {
                     .keyboardShortcut(.cancelAction)
                 Button("Create", action: create)
                     .keyboardShortcut(.defaultAction)
-                    .disabled(creating || name.isEmpty || (useLocalImage && localImage == nil) || (bridged && interface.isEmpty))
+                    .disabled(creating || name.isEmpty || (image == Self.localFile && localImage == nil) || (bridged && interface.isEmpty))
             }
         }
         .formStyle(.grouped)
@@ -116,10 +132,11 @@ struct NewVMView: View {
             memoryMB: memoryMB,
             diskGB: diskGB,
             network: bridged ? .bridged(interface: interface) : .nat,
-            image: useLocalImage ? .local(localImage!) : .debian13,
+            image: image == Self.localFile ? .local(localImage!) : ImageSource.named(image) ?? .default,
             password: password,
             autostart: autostart,
-            startNow: startNow
+            startNow: startNow,
+            user: user.trimmingCharacters(in: .whitespaces)
         )
         creating = true
         error = nil

@@ -59,11 +59,11 @@ final class CloudInitSeedTests: XCTestCase {
         let name = "proxmacs-test-\(UUID().uuidString.prefix(8).lowercased())"
         defer { try? FileManager.default.removeItem(at: Paths.vmDir(name)) }
 
-        let deb = FileManager.default.temporaryDirectory.appending(path: "\(name).deb")
-        try Data("fake".utf8).write(to: deb)
-        defer { try? FileManager.default.removeItem(at: deb) }
+        let packages = ["deb", "rpm"].map { FileManager.default.temporaryDirectory.appending(path: "\(name).\($0)") }
+        for package in packages { try Data("fake".utf8).write(to: package) }
+        defer { for package in packages { try? FileManager.default.removeItem(at: package) } }
 
-        try await CloudInitSeed.build(name: name, config: CloudInitConfig(), agentDeb: deb)
+        try await CloudInitSeed.build(name: name, config: CloudInitConfig(), agentPackages: packages)
         let iso = Paths.seedISO(name)
         XCTAssertTrue(FileManager.default.fileExists(atPath: iso.path))
 
@@ -75,7 +75,7 @@ final class CloudInitSeedTests: XCTestCase {
         defer { _ = try? Shell.runSync("/usr/bin/hdiutil", ["detach", mountPoint.path]) }
 
         let files = Set(try FileManager.default.contentsOfDirectory(atPath: mountPoint.path))
-        XCTAssertTrue(files.isSuperset(of: ["meta-data", "user-data", "network-config", "tart-guest-agent.deb"]), "got \(files)")
+        XCTAssertTrue(files.isSuperset(of: ["meta-data", "user-data", "network-config", "tart-guest-agent.deb", "tart-guest-agent.rpm"]), "got \(files)")
         let meta = try String(contentsOf: mountPoint.appending(path: "meta-data"), encoding: .utf8)
         XCTAssertTrue(meta.contains("local-hostname: \(name)"))
     }

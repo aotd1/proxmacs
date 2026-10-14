@@ -23,7 +23,7 @@ export function CreateVMDialog({ onClose }: { onClose: () => void }) {
     cpus: String(Math.min(2, hostCPUs)),
     memoryMB: String(hostGB >= 16 ? 4096 : 2048),
     diskGB: '20',
-    image: 'debian13',
+    image: 'debian-13',
     mode: (defaultIface ? 'bridged' : 'nat') as 'bridged' | 'nat',
     iface: defaultIface?.device ?? '',
     autostart: false,
@@ -40,7 +40,7 @@ export function CreateVMDialog({ onClose }: { onClose: () => void }) {
       ([imageList, keys]) => {
         if (cancelled) return;
         setImages(imageList);
-        setGuest(guestForm(undefined, keys));
+        setGuest({ ...guestForm(undefined, keys), user: imageList.find((i) => i.id === 'debian-13')?.user ?? 'debian' });
       },
       (e) => { if (!cancelled) { report(e); closeRef.current(); } },
     );
@@ -48,6 +48,18 @@ export function CreateVMDialog({ onClose }: { onClose: () => void }) {
   }, [reloadInterfaces, report]);
 
   const nameTaken = !!app.vm(f.name.trim());
+  const image = images?.find((i) => i.id === f.image);
+  const minDiskGB = image?.sizeBytes ? Math.ceil(image.sizeBytes / 1e9) : 10;
+
+  const chooseImage = (id: string) => {
+    const next = images?.find((i) => i.id === id);
+    // Follow the distribution's default user unless it was changed by hand.
+    if (guest && next?.user && guest.user === (image?.user ?? 'debian')) setGuest({ ...guest, user: next.user });
+    set({ image: id });
+  };
+  const distros = [...new Set(images?.filter((i) => i.distro).map((i) => i.distro!))];
+  const imported = images?.filter((i) => i.imported) ?? [];
+  const option = (i: Image) => <option key={i.id} value={i.id}>{i.name}{i.cached ? '' : ' (download)'}</option>;
 
   const submit = async (e: FormEvent) => {
     e.preventDefault();
@@ -98,11 +110,12 @@ export function CreateVMDialog({ onClose }: { onClose: () => void }) {
               </Field>
               <MemoryField value={f.memoryMB} onChange={(memoryMB) => set({ memoryMB })} hostBytes={app.host?.memoryBytes} />
               <Field label="Disk (GB)">
-                <input type="number" required min={10} max={4096} step={1} value={f.diskGB} onChange={(e) => set({ diskGB: e.target.value })} />
+                <input type="number" required min={minDiskGB} max={4096} step={1} value={f.diskGB} onChange={(e) => set({ diskGB: e.target.value })} />
               </Field>
-              <Field label="Image">
-                <select required value={f.image} onChange={(e) => set({ image: e.target.value })}>
-                  {images.map((i) => <option key={i.id} value={i.id}>{i.name || i.id}{i.cached ? '' : ' (will be downloaded)'}</option>)}
+              <Field label="Image" hint={image && !image.cached ? 'Downloaded when the VM is created (or ahead of time under Host → Images)' : undefined}>
+                <select required value={f.image} onChange={(e) => chooseImage(e.target.value)}>
+                  {distros.map((d) => <optgroup key={d} label={d}>{images.filter((i) => i.distro === d).map(option)}</optgroup>)}
+                  {imported.length > 0 && <optgroup label="Imported">{imported.map(option)}</optgroup>}
                 </select>
               </Field>
               <div className="field">

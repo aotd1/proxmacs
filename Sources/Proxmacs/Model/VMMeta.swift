@@ -132,6 +132,8 @@ struct VMMeta: Codable, Hashable {
     var cloudInit: CloudInitConfig?
     /// The seed changed while the VM was running; cleared when the VM next starts.
     var seedPending = false
+    /// What the VM was created from (image name); nil for VMs created by older versions.
+    var image: String?
 
     var effectiveCloudInit: CloudInitConfig { cloudInit ?? .legacy }
 
@@ -152,6 +154,7 @@ struct VMMeta: Codable, Hashable {
         created = try c.decodeIfPresent(Date.self, forKey: .created) ?? Date()
         cloudInit = try c.decodeIfPresent(CloudInitConfig.self, forKey: .cloudInit)
         seedPending = try c.decodeIfPresent(Bool.self, forKey: .seedPending) ?? false
+        image = try c.decodeIfPresent(String.self, forKey: .image)
     }
 
     static func load(_ name: String) -> VMMeta? {

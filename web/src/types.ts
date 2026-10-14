@@ -50,6 +50,8 @@ export interface VM {
   cloudInit: CloudInit;
   seedPending: boolean;
   hasSeed: boolean;
+  /** Image the VM was created from; null for VMs created by older versions. */
+  image: string | null;
 }
 
 export interface Task {
@@ -149,9 +151,22 @@ export interface NetInterface {
 }
 
 export interface Image {
+  /** Catalog id, or the file name of an imported image. */
   id: string;
   name: string;
+  /** null for imported images. */
+  distro: string | null;
+  /** Suggested cloud-init user. */
+  user: string | null;
+  /** Where the catalog image is downloaded from. */
+  url: string | null;
+  imported: boolean;
   cached: boolean;
+  /** Virtual disk size: the smallest disk a VM from this image can have. */
+  sizeBytes: number | null;
+  /** Space the cached (sparse) image takes. */
+  diskBytes: number | null;
+  downloading: { message: string; progress: number | null } | null;
 }
 
 export interface Backup {

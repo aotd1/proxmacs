@@ -1,7 +1,8 @@
 import Foundation
 
 /// Builds a cloud-init NoCloud seed ISO (volume label `cidata`) for a VM.
-/// The tart-guest-agent .deb is baked into the ISO so first boot needs no internet to install it.
+/// The tart-guest-agent packages (.deb and .rpm) are baked into the ISO so first boot needs no internet
+/// to install the agent.
 ///
 /// Every build gets a fresh instance-id, so editing a VM's settings and rebuilding the seed makes
 /// cloud-init treat the next boot as a new instance and apply user, keys, password and network again.
@@ -74,7 +75,11 @@ enum CloudInitSeed {
         [ -n "$dev" ] || dev=$(blkid -t LABEL=CIDATA -o device | head -n1)
         mkdir -p /mnt/cidata
         if mount -o ro "$dev" /mnt/cidata; then
-          dpkg -i /mnt/cidata/tart-guest-agent.deb
+          if command -v dpkg >/dev/null; then
+            dpkg -i /mnt/cidata/tart-guest-agent.deb
+          elif command -v rpm >/dev/null; then
+            rpm -U --replacepkgs /mnt/cidata/tart-guest-agent.rpm
+          fi
           umount /mnt/cidata
         fi
         systemctl daemon-reload
@@ -122,7 +127,7 @@ enum CloudInitSeed {
         return lines.joined(separator: "\n") + "\n"
     }
 
-    static func build(name: String, config: CloudInitConfig, agentDeb: URL) async throws {
+    static func build(name: String, config: CloudInitConfig, agentPackages: [URL]) async throws {
         try config.validate()
         let stage = FileManager.default.temporaryDirectory.appending(path: "proxmacs-seed-\(UUID().uuidString)", directoryHint: .isDirectory)
         try FileManager.default.createDirectory(at: stage, withIntermediateDirectories: true)
@@ -132,7 +137,9 @@ enum CloudInitSeed {
         try metaData.write(to: stage.appending(path: "meta-data"), atomically: true, encoding: .utf8)
         try userData(hostname: name, config: config).write(to: stage.appending(path: "user-data"), atomically: true, encoding: .utf8)
         try networkConfig(config.network).write(to: stage.appending(path: "network-config"), atomically: true, encoding: .utf8)
-        try FileManager.default.copyItem(at: agentDeb, to: stage.appending(path: "tart-guest-agent.deb"))
+        for package in agentPackages {
+            try FileManager.default.copyItem(at: package, to: stage.appending(path: "tart-guest-agent.\(package.pathExtension)"))
+        }
 
         // Build next to the old seed and swap, so a failed build leaves the VM bootable.
         let iso = Paths.seedISO(name)

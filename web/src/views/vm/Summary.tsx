@@ -61,6 +61,7 @@ export function VMSummary({ vm, navigate }: { vm: VM; navigate: Navigate }) {
             ['CPUs', vm.cpus != null ? String(vm.cpus) : '—'],
             ['Memory', fmtMemMB(vm.memoryMB)],
             ['Disk', vm.diskGB != null ? `${vm.diskGB} GB` : '—'],
+            !!vm.image && ['Image', vm.image],
           ]} />
         </Panel>
         <Panel title="Cloud-Init" extra={edit('cloudinit')}>

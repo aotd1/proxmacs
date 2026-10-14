@@ -6,9 +6,12 @@ A Proxmox-flavoured menubar VM manager for Apple Silicon Macs, built on [Tart](h
 
 - **Bridged networking**: VMs get their own LAN IP. Tart's official build is signed with Apple's
   `com.apple.vm.networking` entitlement, so it can use Virtualization.framework's native bridge.
-- **Cloud images**: Debian 13 arm64 genericcloud, downloaded and converted from qcow2 to raw natively (no qemu-img).
-  Provisioned with cloud-init: user (default `debian`, passwordless sudo), SSH keys (default: your `~/.ssh/*.pub`),
-  an optional console password (stored only as a SHA-512 crypt hash), DHCP or a static IPv4, and tart-guest-agent.
+- **Cloud images**: arm64 cloud images of Debian 13/12, Ubuntu 26.04/24.04, Fedora 44, Rocky Linux 10/9, AlmaLinux 10/9
+  and CentOS Stream 10, or your own `.qcow2`/`.raw`. They are downloaded on first use or ahead of time (Host → Images,
+  `cli image-pull`), converted from qcow2 to sparse raw natively (no qemu-img) and cached.
+  Provisioned with cloud-init: user (default: the distribution's, e.g. `debian`, `ubuntu`, `rocky`; passwordless sudo),
+  SSH keys (default: your `~/.ssh/*.pub`), an optional console password (stored only as a SHA-512 crypt hash), DHCP or a
+  static IPv4, and tart-guest-agent (.deb or .rpm).
 - **Editing VMs**: CPUs, memory, disk (grow only; the root filesystem grows on next boot) and network while stopped.
   Cloud-init settings (user, password, SSH keys, IP) can be changed any time: the seed is rebuilt with a new
   instance-id and cloud-init re-applies them on the next start. `authorized_keys` ends up exactly as configured, and
@@ -69,7 +72,10 @@ The same binary has a scriptable mode that shares code with the menubar:
 
 ```bash
 P=build/Proxmacs.app/Contents/MacOS/Proxmacs
+$P cli images                                          # catalog and cached images
+$P cli image-pull ubuntu-24.04                         # download ahead of time (image-rm removes it)
 $P cli create web1 --bridged en10 --disk 20 --password secret
+$P cli create app1 --nat --image rocky-10              # user defaults to the image's (rocky)
 $P cli create db1 --nat --user admin --ssh-keys ~/.ssh/id_ed25519.pub --ip 192.168.64.50/24 --gateway 192.168.64.1
 $P cli edit web1 --cpus 4 --memory 8192 --disk 40      # VM stopped
 $P cli edit web1 --password --dhcp                     # prompts; applied on next start
@@ -139,7 +145,7 @@ certificate (`tls` false, `bind` 127.0.0.1), for a full install. Icons are gener
 
 | Path | Contents |
 | --- | --- |
-| `~/Library/Application Support/Proxmacs/images/` | cached base images (`*.raw`) and the agent `.deb` |
+| `~/Library/Application Support/Proxmacs/images/` | cached base images (`<id>-arm64.raw`, imported `*.raw`) and the agent `.deb`/`.rpm` |
 | `~/Library/Application Support/Proxmacs/vms/<name>/` | `meta.json` (incl. cloud-init settings), `seed.iso` (cloud-init), `run.log`, `console.log` |
 | `~/Library/Application Support/Proxmacs/backups/<name>/<timestamp>/` | cloned `disk.img`, `nvram.bin`, `config.json` (or `<backup storage>/<name>/…`) |
 | `~/Library/Application Support/Proxmacs/storage.json` | custom VM / backup storage locations |

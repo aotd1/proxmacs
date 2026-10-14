@@ -18,8 +18,24 @@ struct VMItem: Identifiable, Hashable {
 }
 
 enum ImageSource: Hashable {
-    case debian13
+    case catalog(CatalogImage)
+    /// A .qcow2 or .raw file, imported into the image cache.
     case local(URL)
+
+    static var `default`: ImageSource { .catalog(ImageCatalog.find(ImageCatalog.defaultID)!) }
+
+    /// A catalog id, or the name of an image already imported into the cache.
+    static func named(_ id: String) -> ImageSource? {
+        if let image = ImageCatalog.find(id) { return .catalog(image) }
+        return ImageStore.imported().first { $0.lastPathComponent == id }.map { .local($0) }
+    }
+
+    var label: String {
+        switch self {
+        case .catalog(let image): image.name
+        case .local(let url): url.lastPathComponent
+        }
+    }
 }
 
 struct NewVMRequest {
@@ -265,13 +281,20 @@ final class AppState {
     private func createVM(_ request: NewVMRequest, task: TaskHandle) async throws {
         let tart = try requireTart()
         let name = request.name
-        let report: @Sendable (String) -> Void = { task.message($0) }
+        let report: ImageReport = { message, fraction in
+            task.message(message)
+            if let fraction { task.progress(fraction) }
+        }
 
         let base: URL = switch request.image {
-        case .debian13: try await ImageStore.debianBase(status: report)
-        case .local(let url): try await ImageStore.importLocal(url, status: report)
+        case .catalog(let image): try await ImageStore.base(image, report: report)
+        case .local(let url): try await ImageStore.importLocal(url, report: report)
         }
-        let agent = try await ImageStore.agentPackage(status: report)
+        let neededGB = Int((FileCopy.size(of: base) + 999_999_999) / 1_000_000_000)
+        guard request.diskGB >= neededGB else {
+            throw ProxmacsError("\(request.image.label) needs a disk of at least \(neededGB) GB")
+        }
+        let agent = try await ImageStore.agentPackages(report: report)
 
         task.message("Creating VM \(name)…")
         try await tart.createLinux(name, diskSizeGB: request.diskGB)
@@ -288,9 +311,10 @@ final class AppState {
             }
             var meta = VMMeta(name: name, network: request.network, autostart: request.autostart)
             meta.cloudInit = config
+            meta.image = request.image.label
             try meta.save()
             task.message("Building cloud-init seed…")
-            try await CloudInitSeed.build(name: name, config: config, agentDeb: agent)
+            try await CloudInitSeed.build(name: name, config: config, agentPackages: agent)
             try LaunchAgent.write(tart: tart, meta: meta)
         } catch {
             // Roll back so a half-created VM doesn't linger.
@@ -304,6 +328,25 @@ final class AppState {
             task.message("Starting \(name)…")
             try await LaunchAgent.start(name)
         }
+    }
+
+    // MARK: - Images
+
+    /// Downloads a catalog image into the cache, so creating VMs from it doesn't wait for the download.
+    func downloadImage(_ image: CatalogImage, taskID: String? = nil) async throws {
+        try await performThrowing(nil, "Download \(image.name)", taskID: taskID) { task in
+            let raw = try await ImageStore.base(image) { message, fraction in
+                task.message(message)
+                if let fraction { task.progress(fraction) }
+            }
+            let size = ByteCountFormatter.string(fromByteCount: FileCopy.allocatedSize(of: raw), countStyle: .memory)
+            return "\(image.name) is ready (\(size) on disk)"
+        }
+    }
+
+    func deleteImage(_ id: String) throws {
+        try ImageStore.delete(id)
+        status = "Deleted image \(ImageCatalog.find(id)?.name ?? id)"
     }
 
     func start(_ vm: String, taskID: String? = nil) async {
@@ -398,8 +441,8 @@ final class AppState {
         try config.validate()
 
         try await performThrowing(vm, "Edit cloud-init", taskID: taskID) { task in
-            let agent = try await ImageStore.agentPackage { task.message($0) }
-            try await CloudInitSeed.build(name: vm, config: config, agentDeb: agent)
+            let agent = try await ImageStore.agentPackages { message, _ in task.message(message) }
+            try await CloudInitSeed.build(name: vm, config: config, agentPackages: agent)
             let running = item(vm)?.isRunning ?? false
             try updateMeta(vm) {
                 $0.cloudInit = config

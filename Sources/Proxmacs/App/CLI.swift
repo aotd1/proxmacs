@@ -18,7 +18,7 @@ enum CLI {
     usage: Proxmacs cli <command>
       list
       create <name> [--nat | --bridged <iface>] [--cpus N] [--memory MB] [--disk GB]
-                    [--image <file.qcow2|raw>] [--password P] [--autostart] [--no-start]
+                    [--image <id|file.qcow2|raw>] [--password P] [--autostart] [--no-start]
                     [--user U] [--ssh-keys FILE] [--ip CIDR [--gateway IP] [--dns IP,IP]]
       edit <name>   hardware (VM stopped): [--cpus N] [--memory MB] [--disk GB] [--nat | --bridged <iface>]
                     cloud-init (applied on next start): [--user U] [--password | --no-password]
@@ -27,6 +27,10 @@ enum CLI {
       ip <name> [--wait SECONDS]
       backups <name>
       restore <name> [index]      (0 = newest, as listed by `backups`)
+
+      images                           list cloud images (catalog and imported)
+      image-pull <id>                  download and cache an image ahead of creating VMs
+      image-rm <id>                    remove a cached image
 
       targets
       target-add smb <name> <smb://user@host/share[/path]> [--keep N]        (prompts for the password)
@@ -115,22 +119,52 @@ enum CLI {
             } else {
                 .bridged(interface: await NetworkInterfaces.defaultRoute() ?? "en0")
             }
+            let image: ImageSource = try option("--image").map { value in
+                if let named = ImageSource.named(value) { return named }
+                let path = (value as NSString).expandingTildeInPath
+                guard FileManager.default.fileExists(atPath: path) else {
+                    throw ProxmacsError("No image or file \(value) (see `images`)")
+                }
+                return .local(URL(fileURLWithPath: path))
+            } ?? .default
+            let defaultUser = if case .catalog(let catalog) = image { catalog.user } else { "debian" }
             let request = NewVMRequest(
                 name: vm,
                 cpus: option("--cpus").flatMap(Int.init) ?? 2,
                 memoryMB: option("--memory").flatMap(Int.init) ?? 2048,
                 diskGB: option("--disk").flatMap(Int.init) ?? 20,
                 network: network,
-                image: option("--image").map { .local(URL(fileURLWithPath: $0)) } ?? .debian13,
+                image: image,
                 password: option("--password") ?? "",
                 autostart: args.contains("--autostart"),
                 startNow: !args.contains("--no-start"),
-                user: option("--user") ?? "debian",
+                user: option("--user") ?? defaultUser,
                 sshKeys: try option("--ssh-keys").map(sshKeys),
                 guestNetwork: guestNetwork(GuestNetwork())
             )
             try await state.create(request)
             print("created \(vm) (\(network.label))")
+
+        case "images":
+            let downloads = ImageDownloads.shared.progress()
+            for image in ImageStore.entries() {
+                let status = if let download = downloads[image.id] {
+                    download.message
+                } else if image.cached, let disk = image.diskBytes {
+                    "cached, \(ByteCountFormatter.string(fromByteCount: disk, countStyle: .memory)) on disk"
+                } else {
+                    "-"
+                }
+                print([image.id, image.catalog == nil ? "imported" : image.name, image.catalog?.user ?? "-", status].joined(separator: "\t"))
+            }
+
+        case "image-pull":
+            let id = try name()
+            guard let image = ImageCatalog.find(id) else { throw ProxmacsError("No image \(id) (see `images`)") }
+            try await state.downloadImage(image)
+
+        case "image-rm":
+            try state.deleteImage(try name())
 
         case "edit":
             let vm = try name()

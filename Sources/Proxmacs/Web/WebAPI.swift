@@ -111,15 +111,31 @@ struct WebAPI: Sendable {
             return API.json(interfaces.map { ["device": $0.device, "name": $0.name, "default": $0.device == preferred] })
         }
         router.get("/api/images") { _, _ in
-            var images: [[String: Any]] = [[
-                "id": "debian13", "name": "Debian 13 (trixie) arm64",
-                "cached": FileManager.default.fileExists(atPath: ImageStore.debianRaw.path),
-            ]]
-            let files = (try? FileManager.default.contentsOfDirectory(atPath: Paths.images.path)) ?? []
-            for file in files.sorted() where file.hasSuffix(".raw") && file != ImageStore.debianRaw.lastPathComponent {
-                images.append(["id": file, "name": file, "cached": true])
+            let progress = ImageDownloads.shared.progress()
+            return API.json(ImageStore.entries().map { image -> [String: Any] in
+                let download = progress[image.id]
+                return [
+                    "id": image.id, "name": image.name, "distro": image.catalog?.distro as Any? ?? NSNull(),
+                    "user": image.catalog?.user as Any? ?? NSNull(), "url": image.catalog?.page.absoluteString as Any? ?? NSNull(),
+                    "imported": image.catalog == nil, "cached": image.cached,
+                    "sizeBytes": image.virtualBytes as Any? ?? NSNull(), "diskBytes": image.diskBytes as Any? ?? NSNull(),
+                    "downloading": download.map { ["message": $0.message, "progress": $0.fraction as Any? ?? NSNull()] } as Any? ?? NSNull(),
+                ]
+            })
+        }
+        router.post("/api/images/:id/download") { _, context in
+            await API.guarded {
+                guard let image = context.parameters.get("id").flatMap(ImageCatalog.find) else { throw APIError.notFound("Image") }
+                let task = Self.newTaskID()
+                Task { @MainActor in try? await state.downloadImage(image, taskID: task) }
+                return API.json(["task": task], status: .accepted)
             }
-            return API.json(images)
+        }
+        router.delete("/api/images/:id") { _, context in
+            await API.guarded {
+                try await state.deleteImage(context.parameters.get("id") ?? "")
+                return API.noContent()
+            }
         }
         router.get("/api/tasks") { _, _ in
             let tasks = await state.tasks
@@ -147,7 +163,7 @@ struct WebAPI: Sendable {
                         "gateway": config.network.gateway as Any? ?? NSNull(), "dns": config.network.dns],
         ]
         return [
-            "cloudInit": cloudInit, "seedPending": item.meta.seedPending,
+            "cloudInit": cloudInit, "seedPending": item.meta.seedPending, "image": item.meta.image as Any? ?? NSNull(),
             "hasSeed": FileManager.default.fileExists(atPath: Paths.seedISO(item.name).path),
             "name": item.name, "state": item.state, "ip": item.ip as Any? ?? NSNull(), "network": network,
             "cpus": item.cpus as Any? ?? NSNull(), "memoryMB": item.memoryMB as Any? ?? NSNull(), "diskGB": item.diskGB as Any? ?? NSNull(),
@@ -169,8 +185,8 @@ struct WebAPI: Sendable {
                 let body = try await API.body(request)
                 guard let name = body["name"] as? String else { throw APIError(message: "name is required") }
                 let mode = await Self.networkMode(body["network"] as? [String: Any]) ?? .nat
-                let imageID = body["image"] as? String ?? "debian13"
-                let image: ImageSource = imageID == "debian13" ? .debian13 : .local(Paths.images.appending(path: (imageID as NSString).lastPathComponent))
+                let imageID = body["image"] as? String ?? ImageCatalog.defaultID
+                guard let image = ImageSource.named(imageID) else { throw APIError(message: "No image \(imageID)") }
                 let vmRequest = NewVMRequest(
                     name: name, cpus: body["cpus"] as? Int ?? 2, memoryMB: body["memoryMB"] as? Int ?? 2048,
                     diskGB: body["diskGB"] as? Int ?? 20, network: mode, image: image,
