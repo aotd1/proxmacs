@@ -411,7 +411,8 @@ The PF network tests require root and a real remote peer; unit tests below do no
 This remains an experimental Apple display server. During a real deployment on Tart 2.40.1 / macOS 27.2 beta
 (26B5091g), a raw TCP/RFB diagnostic connection coincided with a Tart SIGTRAP in Apple's
 `_VZVirtualMachineAccessor addAccessorObserver:` / `_VZVNCServer _setupVirtualMachineAccessor`.
-The guest service restarted and the browser console recovered. The exact trigger and concurrent-viewer behavior
+A subsequent occurrence of the same Apple assertion was observed without an intentional raw VNC probe.
+The guest service restarted automatically. The exact trigger and concurrent-viewer behavior
 have not been established; do not treat this as a production stability guarantee or use raw VNC banner probes
 as a health check. The installer probes disposable TCP servers, not the running Apple VNC server.
 
