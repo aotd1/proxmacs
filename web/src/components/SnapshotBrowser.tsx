@@ -43,6 +43,12 @@ export function SnapshotBrowser({ targetId, vm, autoLoad, ref }: { targetId: str
       `Pull ${s.vm || vm} from ${target?.name ?? 'target'}`);
   };
 
+  const verify = (s: Snapshot) => {
+    const target = app.target(targetId);
+    return app.startTask('POST', `/api/targets/${enc(targetId)}/verify`, { vm: s.vm || vm, id: s.id },
+      `Verify ${s.vm || vm} on ${target?.name ?? 'target'}`);
+  };
+
   if (state.status === 'idle') return null;
   if (state.status === 'error') return <Empty error>{state.message}</Empty>;
   if (state.status === 'loading' && !state.items.length) return <Empty><Spinner /> Loading snapshots…</Empty>;
@@ -56,7 +62,10 @@ export function SnapshotBrowser({ targetId, vm, autoLoad, ref }: { targetId: str
             <td className="nowrap">{fmtDate(s.time)}</td>
             <td className="wrap mono muted">{s.id}</td>
             <td className="actions-cell">
-              <ActionButton className="small" title="Copy this snapshot into local backups" onClick={() => pull(s)}>Pull</ActionButton>
+              <div className="actions">
+                <ActionButton className="small" title="Read the snapshot back and check every chunk" onClick={() => verify(s)}>Verify</ActionButton>
+                <ActionButton className="small" title="Copy this snapshot into local backups" onClick={() => pull(s)}>Pull</ActionButton>
+              </div>
             </td>
           </tr>
         ))}

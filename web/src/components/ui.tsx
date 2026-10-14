@@ -1,4 +1,4 @@
-import { Fragment, useState, type ReactNode } from 'react';
+import { Fragment, useEffect, useRef, useState, type ReactNode } from 'react';
 import type { VMState } from '../types';
 import { useToast } from './Toasts';
 
@@ -104,4 +104,65 @@ export function Segmented<T extends string>({ value, options, onChange, name }: 
       ))}
     </div>
   );
+}
+
+export interface MenuItem {
+  label: ReactNode;
+  onClick: () => Promise<unknown> | void;
+  disabled?: boolean;
+  title?: string;
+  danger?: boolean;
+}
+
+/** A button that opens a small menu of actions; errors are toasted. */
+export function MenuButton({ label, items, className = '', align = 'left', disabled }: {
+  label: ReactNode;
+  items: (MenuItem | null | false)[];
+  className?: string;
+  align?: 'left' | 'right';
+  disabled?: boolean;
+}) {
+  const [open, setOpen] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+  const { report } = useToast();
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e: MouseEvent) => { if (!ref.current?.contains(e.target as Node)) setOpen(false); };
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setOpen(false); };
+    document.addEventListener('mousedown', onDown);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('mousedown', onDown);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [open]);
+  const run = async (item: MenuItem) => {
+    setOpen(false);
+    setBusy(true);
+    try { await item.onClick(); } catch (e) { report(e); } finally { setBusy(false); }
+  };
+  return (
+    <div className="menu-wrap" ref={ref}>
+      <button type="button" className={`btn ${className}`} aria-haspopup="menu" aria-expanded={open} disabled={disabled || busy}
+        onClick={() => setOpen(!open)}>
+        {busy && <Spinner />}{label}<span className="caret" aria-hidden="true" />
+      </button>
+      {open && (
+        <div className={`menu ${align}`} role="menu">
+          {items.filter((i): i is MenuItem => !!i).map((item, i) => (
+            <button key={i} type="button" role="menuitem" className={`menu-item${item.danger ? ' danger' : ''}`}
+              disabled={item.disabled} title={item.title} onClick={() => run(item)}>
+              {item.label}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+export function Tags({ tags }: { tags: string[] }) {
+  if (!tags.length) return null;
+  return <span className="tags">{tags.map((t) => <span key={t} className="tag">{t}</span>)}</span>;
 }

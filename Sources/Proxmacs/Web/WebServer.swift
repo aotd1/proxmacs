@@ -115,7 +115,16 @@ struct SecurityHeadersMiddleware<Context: RequestContext>: RouterMiddleware {
         response.headers[.xFrameOptions] = "DENY"
         response.headers[.xContentTypeOptions] = "nosniff"
         response.headers[.referrerPolicy] = "no-referrer"
-        if request.uri.path.hasPrefix("/api/") { response.headers[.cacheControl] = "no-store" }
+        let path = request.uri.path
+        if path.hasPrefix("/api/") {
+            response.headers[.cacheControl] = "no-store"
+        } else if path.hasPrefix("/assets/") {
+            // Vite names bundles by content hash.
+            response.headers[.cacheControl] = "public, max-age=31536000, immutable"
+        } else if response.headers[.cacheControl] == nil {
+            // index.html names the current bundles: revalidate it, or an upgrade keeps serving the old UI.
+            response.headers[.cacheControl] = "no-cache"
+        }
         return response
     }
 }

@@ -53,9 +53,29 @@ export function networkLabel(net: NetworkConfig | null | undefined, interfaces: 
   return String(net.mode || '—');
 }
 
-export function backupLabel(b: BackupPolicy | null | undefined): string {
+export function retentionLabel(b: BackupPolicy | null | undefined): string {
   if (!b) return '—';
-  return b.daily ? `Daily at ${pad2(b.hour)}:00, keep ${b.keep}` : `Scheduled backups off (keep ${b.keep})`;
+  const parts = ([[b.keep, 'last'], [b.keepDaily, 'daily'], [b.keepWeekly, 'weekly'], [b.keepMonthly, 'monthly'], [b.keepYearly, 'yearly']] as const)
+    .filter(([n]) => n > 0).map(([n, label]) => `${n} ${label}`);
+  return parts.length ? `Keep ${parts.join(', ')}` : 'Keep all';
+}
+
+export function fmtRate(bytesPerSecond: number | null | undefined): string {
+  if (bytesPerSecond == null || !Number.isFinite(bytesPerSecond)) return '—';
+  return `${fmtBytes(bytesPerSecond)}/s`;
+}
+
+export function fmtPercent(fraction: number | null | undefined, digits = 0): string {
+  if (fraction == null || !Number.isFinite(fraction)) return '—';
+  return `${(fraction * 100).toFixed(digits)}%`;
+}
+
+export function fmtUptime(seconds: number | null | undefined): string {
+  if (seconds == null || !Number.isFinite(seconds)) return '—';
+  const d = Math.floor(seconds / 86400), h = Math.floor((seconds % 86400) / 3600), m = Math.floor((seconds % 3600) / 60);
+  if (d) return `${d}d ${h}h`;
+  if (h) return `${h}h ${m}m`;
+  return `${m}m`;
 }
 
 export function plural(n: number, word: string): string {

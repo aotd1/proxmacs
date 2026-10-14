@@ -112,6 +112,56 @@ final class OffsiteTests: XCTestCase {
         XCTAssertEqual(storedChunkCount(), 5)
     }
 
+    func testChunkStoreExtraDisksAndVerify() async throws {
+        let store = ChunkStoreBackend(localRoot: tmp.appending(path: "share"))
+        let chunk = ImageChunker.chunkSize
+        let backup = try makeBackup("x", size: UInt64(4 * chunk), writes: [(1, 5)])
+        let extra = try SparseImageWriter(url: backup.appending(path: "disk1.img"), size: UInt64(8 * chunk))
+        try extra.write(Data(repeating: 9, count: 4096), at: UInt64(6 * chunk))
+        try extra.finish()
+        let record = BackupRecord(date: Date(timeIntervalSince1970: 3_000_000), consistent: true, vmWasRunning: false)
+        try await store.push(vm: "vm2", backupDir: backup, record: record) { _ in }
+
+        let snapshot = try await store.snapshots(vm: "vm2")[0]
+        let summary = try await store.verify(snapshot) { _ in }
+        XCTAssertTrue(summary.hasPrefix("4 chunks"), summary)  // 2 data chunks + nvram + config
+
+        let restored = tmp.appending(path: "restored2", directoryHint: .isDirectory)
+        try await store.pull(snapshot, into: restored) { _ in }
+        XCTAssertEqual(try Data(contentsOf: restored.appending(path: "disk1.img")), try Data(contentsOf: backup.appending(path: "disk1.img")))
+        XCTAssertEqual(BackupFiles.images(in: restored), ["disk.img", "disk1.img"])
+
+        // Corrupt the extra disk's data chunk: verify must notice.
+        let digest = try ImageChunker(url: backup.appending(path: "disk1.img")).chunk(at: 6).digest.hex
+        let file = tmp.appending(path: "share/proxmacs-store/chunks/\(digest.prefix(2))/\(digest)")
+        try DataBlob.encode(Data(repeating: 1, count: 4096)).write(to: file)
+        do {
+            _ = try await store.verify(snapshot) { _ in }
+            XCTFail("verify passed a corrupt chunk")
+        } catch {
+            XCTAssertTrue(error.localizedDescription.contains("corrupt"), error.localizedDescription)
+        }
+    }
+
+    func testBackupStraightToTarget() async throws {
+        // A stopped VM in a scratch Tart home: clone to staging, push, remove the staging copy.
+        let home = tmp.appending(path: "tart", directoryHint: .isDirectory)
+        setenv("TART_HOME", home.path, 1)
+        defer { unsetenv("TART_HOME") }
+        let vmDir = try makeBackup("tart/vms/direct-vm", size: UInt64(2 * ImageChunker.chunkSize), writes: [(1, 4)])
+        let store = ChunkStoreBackend(localRoot: tmp.appending(path: "share"))
+
+        let record = try await BackupManager.backup("direct-vm", running: false, tart: Tart(path: "/usr/bin/false"), to: store) { _ in }
+        XCTAssertTrue(record.consistent)
+        let snapshots = try await store.snapshots(vm: "direct-vm")
+        XCTAssertEqual(snapshots.count, 1)
+        let restored = tmp.appending(path: "restored3", directoryHint: .isDirectory)
+        try await store.pull(snapshots[0], into: restored) { _ in }
+        XCTAssertEqual(try Data(contentsOf: restored.appending(path: "disk.img")), try Data(contentsOf: vmDir.appending(path: "disk.img")))
+        let staging = home.appending(path: ".proxmacs-staging")
+        XCTAssertTrue(((try? FileManager.default.contentsOfDirectory(atPath: staging.path)) ?? []).isEmpty, "staging copy removed")
+    }
+
     private func makeBackup(_ name: String, size: UInt64, writes: [(chunk: Int, byte: UInt8)]) throws -> URL {
         let dir = tmp.appending(path: name, directoryHint: .isDirectory)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)

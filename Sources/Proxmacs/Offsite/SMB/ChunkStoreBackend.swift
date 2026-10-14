@@ -35,6 +35,17 @@ struct ChunkStoreBackend: OffsiteBackend {
         var disk: [String]
         /// file name → chunk digest
         var files: [String: String]
+        /// Extra disk images (disk1.img, …); absent in snapshots of older versions.
+        var extraDisks: [Image]?
+
+        struct Image: Codable {
+            var name: String
+            var size: UInt64
+            var chunks: [String]
+        }
+
+        /// Every disk image: the root disk first.
+        var images: [Image] { [Image(name: BackupFiles.disk, size: diskSize, chunks: disk)] + (extraDisks ?? []) }
     }
 
     // MARK: - OffsiteBackend
@@ -58,21 +69,28 @@ struct ChunkStoreBackend: OffsiteBackend {
             }
 
             // Chunks referenced by the previous snapshot are known to exist: skip even the stat().
-            var known = Set(try latestManifest(root, vm: vm)?.disk ?? [])
-            let chunker = try ImageChunker(url: backupDir.appending(path: BackupFiles.disk))
-            var digests: [String] = []
-            digests.reserveCapacity(chunker.chunkCount)
+            var known = Set(try latestManifest(root, vm: vm)?.images.flatMap(\.chunks) ?? [])
+            let chunkers = try BackupFiles.images(in: backupDir).map { ($0, try ImageChunker(url: backupDir.appending(path: $0))) }
+            let total = Double(max(chunkers.reduce(0) { $0 + $1.1.chunkCount }, 1))
+            var done = 0
+            var images: [Manifest.Image] = []
 
-            for index in 0..<chunker.chunkCount {
-                try Task.checkCancellation()
-                let chunk = try chunker.chunk(at: index)
-                let hex = chunk.digest.hex
-                digests.append(hex)
-                if let data = chunk.data, !known.contains(hex) {
-                    try storeChunk(root, hex: hex, data: data)
-                    known.insert(hex)
+            for (name, chunker) in chunkers {
+                var digests: [String] = []
+                digests.reserveCapacity(chunker.chunkCount)
+                for index in 0..<chunker.chunkCount {
+                    try Task.checkCancellation()
+                    let chunk = try chunker.chunk(at: index)
+                    let hex = chunk.digest.hex
+                    digests.append(hex)
+                    if let data = chunk.data, !known.contains(hex) {
+                        try storeChunk(root, hex: hex, data: data)
+                        known.insert(hex)
+                    }
+                    done += 1
+                    progress(Double(done) / total)
                 }
-                progress(Double(index + 1) / Double(max(chunker.chunkCount, 1)))
+                images.append(Manifest.Image(name: name, size: chunker.size, chunks: digests))
             }
 
             var files: [String: String] = [:]
@@ -83,8 +101,9 @@ struct ChunkStoreBackend: OffsiteBackend {
                 files[name] = hex
             }
 
-            let manifest = Manifest(vm: vm, time: record.date, consistent: record.consistent, diskSize: chunker.size,
-                                    chunkSize: ImageChunker.chunkSize, disk: digests, files: files)
+            let manifest = Manifest(vm: vm, time: record.date, consistent: record.consistent, diskSize: images[0].size,
+                                    chunkSize: ImageChunker.chunkSize, disk: images[0].chunks, files: files,
+                                    extraDisks: images.count > 1 ? Array(images.dropFirst()) : nil)
             try FileManager.default.createDirectory(at: snapshotDir, withIntermediateDirectories: true)
             try atomicWrite(JSONEncoder.proxmacs.encode(manifest), to: snapshotDir.appending(path: "manifest.json"))
         }
@@ -102,22 +121,54 @@ struct ChunkStoreBackend: OffsiteBackend {
             let manifest = try JSONDecoder.proxmacs.decode(Manifest.self, from: Data(contentsOf: url))
 
             try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-            let writer = try SparseImageWriter(url: dir.appending(path: BackupFiles.disk), size: manifest.diskSize)
-            for (index, hex) in manifest.disk.enumerated() {
-                try Task.checkCancellation()
-                let offset = UInt64(index) * UInt64(manifest.chunkSize)
-                let length = Int(min(UInt64(manifest.chunkSize), manifest.diskSize - offset))
-                if isZero(hex, length: length) { continue }
-                try writer.write(loadChunk(root, hex: hex), at: offset)
-                progress(Double(index + 1) / Double(max(manifest.disk.count, 1)))
+            let total = Double(max(manifest.images.reduce(0) { $0 + $1.chunks.count }, 1))
+            var done = 0
+            for image in manifest.images {
+                guard ExtraDisk.isValidFile(image.name) || image.name == BackupFiles.disk else { continue }
+                let writer = try SparseImageWriter(url: dir.appending(path: image.name), size: image.size)
+                for (index, hex) in image.chunks.enumerated() {
+                    try Task.checkCancellation()
+                    done += 1
+                    let offset = UInt64(index) * UInt64(manifest.chunkSize)
+                    let length = Int(min(UInt64(manifest.chunkSize), image.size - offset))
+                    if isZero(hex, length: length) { continue }
+                    try writer.write(loadChunk(root, hex: hex), at: offset)
+                    progress(Double(done) / total)
+                }
+                try writer.finish()
             }
-            try writer.finish()
 
             for (name, hex) in manifest.files {
                 try loadChunk(root, hex: hex).write(to: dir.appending(path: name))
             }
             let record = BackupRecord.pulled(from: snapshot, consistent: manifest.consistent, target: label)
             try JSONEncoder.proxmacs.encode(record).write(to: dir.appending(path: "backup.json"))
+        }
+    }
+
+    func verify(_ snapshot: RemoteSnapshot, progress: ProgressHandler) async throws -> String {
+        try await withStore { root in
+            let url = root.appending(path: "snapshots/\(snapshot.vm)/\(snapshot.id)/manifest.json")
+            let manifest = try JSONDecoder.proxmacs.decode(Manifest.self, from: Data(contentsOf: url))
+            var unique: [String] = []
+            var seen = Set<String>()
+            for image in manifest.images {
+                for (index, hex) in image.chunks.enumerated() {
+                    let length = Int(min(UInt64(manifest.chunkSize), image.size - UInt64(index) * UInt64(manifest.chunkSize)))
+                    if !isZero(hex, length: length), seen.insert(hex).inserted { unique.append(hex) }
+                }
+            }
+            unique += manifest.files.values.filter { seen.insert($0).inserted }
+            var bytes = 0
+            for (index, hex) in unique.enumerated() {
+                try Task.checkCancellation()
+                guard FileManager.default.fileExists(atPath: chunkURL(root, hex: hex).path) else {
+                    throw ProxmacsError("Chunk \(hex) is missing")
+                }
+                bytes += try loadChunk(root, hex: hex).count
+                progress(Double(index + 1) / Double(max(unique.count, 1)))
+            }
+            return "\(unique.count) chunks (\(ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .memory))) verified"
         }
     }
 
@@ -202,7 +253,7 @@ struct ChunkStoreBackend: OffsiteBackend {
         let vms = (try? FileManager.default.contentsOfDirectory(atPath: root.appending(path: "snapshots").path)) ?? []
         for vm in vms where !vm.hasPrefix(".") {
             for entry in try listManifests(root, vm: vm) {
-                referenced.formUnion(entry.manifest.disk)
+                referenced.formUnion(entry.manifest.images.flatMap(\.chunks))
                 referenced.formUnion(entry.manifest.files.values)
             }
         }

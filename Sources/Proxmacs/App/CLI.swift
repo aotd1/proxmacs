@@ -23,10 +23,29 @@ enum CLI {
       edit <name>   hardware (VM stopped): [--cpus N] [--memory MB] [--disk GB] [--nat | --bridged <iface>]
                     cloud-init (applied on next start): [--user U] [--password | --no-password]
                     [--ssh-keys FILE] [--dhcp | --ip CIDR [--gateway IP] [--dns IP,IP]]
-      start|stop|delete|backup <name>
+      start|delete <name>
+      backup <name> [--to <target>]    local backup, or straight to an offsite target
+      stop <name> [--force]            shut down (--force: turn off at once)
+      reboot <name> [--force]          reboot through the guest agent (--force: reset)
+      info <name>                      settings, usage and what the guest agent reports
       ip <name> [--wait SECONDS]
+      clone <name> <new> [--start] [--dhcp | --ip CIDR [--gateway IP] [--dns IP,IP]]
+      template <name> [--off]          make a VM a template (clone-only), or a VM again
+      set <name>    [--tags a,b] [--notes TEXT|-] [--autostart on|off] [--order N|none] [--delay SECONDS]
+                    [--nested on|off] [--keep-last N] [--keep-daily N] [--keep-weekly N] [--keep-monthly N] [--keep-yearly N]
+      disk-add <name> <GB> [--no-backup] | disk-resize <name> <diskN.img> <GB> | disk-rm <name> <diskN.img>
+      share-add <name> <share> <folder> [--ro] | share-rm <name> <share>
+                                       host folders, mounted in the guest at /mnt/shared/<share>
       backups <name>
       restore <name> [index]      (0 = newest, as listed by `backups`)
+
+      jobs                             list backup jobs
+      job-add [--at HH:MM] [--days mon,tue,…|weekdays|weekends] [--vms a,b | --exclude a,b]
+              [--to <target>] [--notify never|failure|always] [--comment TEXT]
+      job-rm|job-run <id>
+      notify                           list notification webhooks
+      notify-add <name> [--format json|discord|slack|ntfy]   add a webhook (prompts for its URL)
+      notify-rm|notify-test <name>
 
       images                           list cloud images (catalog and imported)
       image-pull <id>                  download and cache an image ahead of creating VMs
@@ -41,6 +60,7 @@ enum CLI {
       remote <target> <name>           list remote snapshots
       pull <target> <name> [id]        download a snapshot into local backups (default newest);
                                        recreates the VM if it doesn't exist
+      verify <target> <name> [id]      read a remote snapshot back and check every chunk (default newest)
 
       storage                          show where VM disks and local backups are stored
       storage vms|backups <folder>     move them to a folder, e.g. on an external APFS drive
@@ -107,8 +127,183 @@ enum CLI {
         switch command {
         case "list":
             for vm in state.vms {
-                print([vm.name, vm.state, vm.meta.network.label, vm.ip ?? "-"].joined(separator: "\t"))
+                let tags = vm.meta.tags.isEmpty ? "" : " [\(vm.meta.tags.joined(separator: ","))]"
+                print([vm.name + tags, vm.meta.template ? "template" : vm.state, vm.meta.network.label, vm.ip ?? "-"].joined(separator: "\t"))
             }
+
+        case "info":
+            let vm = try name()
+            guard let item = state.vms.first(where: { $0.name == vm }) else { throw ProxmacsError("No VM named \(vm)") }
+            let meta = item.meta
+            var rows: [(String, String)] = [
+                ("state", meta.template ? "template" : item.state), ("network", meta.network.label), ("ip", item.ip ?? "-"),
+                ("cpus", item.cpus.map(String.init) ?? "-"), ("memory", item.memoryMB.map { "\($0) MB" } ?? "-"),
+                ("disk", item.diskGB.map { "\($0) GB" } ?? "-"),
+            ]
+            for disk in meta.disks {
+                rows.append((disk.file, "\(AppState.diskGB(Paths.tartVMDir(vm).appending(path: disk.file))) GB\(disk.backup ? "" : ", not backed up")"))
+            }
+            for share in meta.shares { rows.append(("share \(share.name)", share.path + (share.readOnly ? " (read-only)" : ""))) }
+            if meta.nested { rows.append(("nested", "on")) }
+            rows.append(("autostart", meta.autostart ? "on" + (meta.startOrder.map { ", order \($0)" } ?? "") + (meta.startDelay > 0 ? ", delay \(meta.startDelay) s" : "") : "off"))
+            rows.append(("retention", meta.backup.label))
+            if !meta.tags.isEmpty { rows.append(("tags", meta.tags.joined(separator: ", "))) }
+            if !meta.notes.isEmpty { rows.append(("notes", meta.notes.replacingOccurrences(of: "\n", with: " / "))) }
+            if item.isRunning, let guest = try? await state.guestInfo(vm) {
+                rows.append(("os", guest.os ?? "-"))
+                rows.append(("kernel", guest.kernel ?? "-"))
+                if let uptime = guest.uptime { rows.append(("uptime", Duration.seconds(uptime).formatted(.units(allowed: [.days, .hours, .minutes], width: .narrow)))) }
+                for interface in guest.interfaces {
+                    rows.append((interface.name, ([interface.mac ?? ""] + interface.addresses).joined(separator: " ")))
+                }
+                for fs in guest.filesystems {
+                    rows.append((fs.mount, "\(ByteCountFormatter.string(fromByteCount: Int64(fs.used), countStyle: .file)) of \(ByteCountFormatter.string(fromByteCount: Int64(fs.size), countStyle: .file)) (\(fs.type))"))
+                }
+            }
+            for (key, value) in rows { print("\(key)\t\(value)") }
+
+        case "clone":
+            guard args.count > 2 else { throw ProxmacsError(usage) }
+            let network: GuestNetwork? = args.contains("--dhcp") || args.contains("--ip") ? guestNetwork(GuestNetwork()) : nil
+            try await state.clone(args[1], to: args[2], start: args.contains("--start"), network: network)
+
+        case "template":
+            try state.setTemplate(try name(), !args.contains("--off"))
+
+        case "set":
+            let vm = try name()
+            func toggle(_ flag: String) throws -> Bool? {
+                guard let value = option(flag) else { return nil }
+                guard ["on", "off"].contains(value) else { throw ProxmacsError("\(flag) takes on or off") }
+                return value == "on"
+            }
+            func count(_ flag: String) throws -> Int? {
+                guard let value = option(flag) else { return nil }
+                guard let n = Int(value), n >= 0 else { throw ProxmacsError("\(flag) takes a number") }
+                return n
+            }
+            let tags = try option("--tags").map { list in
+                try list.split(separator: ",").map { String($0).trimmingCharacters(in: .whitespaces).lowercased() }.filter { !$0.isEmpty }.map { tag in
+                    guard VMMeta.isValidTag(tag) else { throw ProxmacsError("Invalid tag \(tag)") }
+                    return tag
+                }
+            }
+            let notes = option("--notes").map { $0 == "-" ? String(decoding: FileHandle.standardInput.readDataToEndOfFile(), as: UTF8.self) : $0 }
+            let order: Int?? = try option("--order").map { value -> Int? in
+                if value == "none" { return nil }
+                guard let n = Int(value), (0...9999).contains(n) else { throw ProxmacsError("--order takes 0–9999 or none") }
+                return n
+            }
+            let delay = try count("--delay")
+            if let delay, delay > 3600 { throw ProxmacsError("--delay is at most 3600 seconds") }
+            let autostart = try toggle("--autostart")
+            let keeps = try ["--keep-last", "--keep-daily", "--keep-weekly", "--keep-monthly", "--keep-yearly"].map(count)
+            if let nested = try toggle("--nested") { try await state.editHardware(vm, HardwareChange(nested: nested)) }
+            if autostart == true, VMMeta.load(vm)?.template == true { throw ProxmacsError("Templates can't start on login") }
+            try state.updateMeta(vm) { meta in
+                if let tags { meta.tags = tags }
+                if let notes { meta.notes = notes.trimmingCharacters(in: .newlines) }
+                if let order { meta.startOrder = order }
+                if let delay { meta.startDelay = delay }
+                if let autostart { meta.autostart = autostart }
+                if let n = keeps[0] { meta.backup.keep = n }
+                if let n = keeps[1] { meta.backup.keepDaily = n }
+                if let n = keeps[2] { meta.backup.keepWeekly = n }
+                if let n = keeps[3] { meta.backup.keepMonthly = n }
+                if let n = keeps[4] { meta.backup.keepYearly = n }
+            }
+
+        case "disk-add":
+            guard args.count > 2, let size = Int(args[2]) else { throw ProxmacsError(usage) }
+            let file = try state.addDisk(args[1], sizeGB: size)
+            if args.contains("--no-backup") { try state.setDiskBackup(args[1], file: file, backup: false) }
+            print("added \(file)")
+        case "disk-resize":
+            guard args.count > 3, let size = Int(args[3]) else { throw ProxmacsError(usage) }
+            try state.resizeDisk(args[1], file: args[2], sizeGB: size)
+        case "disk-rm":
+            guard args.count > 2 else { throw ProxmacsError(usage) }
+            try state.removeDisk(args[1], file: args[2])
+        case "share-add":
+            guard args.count > 3 else { throw ProxmacsError(usage) }
+            try await state.addShare(args[1], SharedFolder(name: args[2], path: args[3], readOnly: args.contains("--ro")))
+        case "share-rm":
+            guard args.count > 2 else { throw ProxmacsError(usage) }
+            try state.removeShare(args[1], name: args[2])
+
+        case "jobs":
+            for job in JobStore.load() {
+                let selection = switch job.selection {
+                case .all: "all VMs"
+                case .include: job.vms.joined(separator: ",")
+                case .exclude: "all except \(job.vms.joined(separator: ","))"
+                }
+                let last = job.lastRun.map { "last \($0.formatted(.iso8601)) \(job.lastOK == true ? "ok" : "failed")" } ?? "never run"
+                let destination = job.target.map { "to \(TargetStore.target($0)?.name ?? $0)" } ?? "local"
+                print([job.id, job.enabled ? job.scheduleLabel : "disabled", selection, destination, "notify \(job.notify.rawValue)", last, job.comment]
+                    .joined(separator: "\t"))
+            }
+        case "job-add":
+            var job = BackupJob()
+            if let at = option("--at") {
+                let parts = at.split(separator: ":").compactMap { Int($0) }
+                guard parts.count == 2 else { throw ProxmacsError("--at takes HH:MM") }
+                (job.hour, job.minute) = (parts[0], parts[1])
+            }
+            if let days = option("--days") {
+                switch days {
+                case "daily": job.days = []
+                case "weekdays": job.days = [1, 2, 3, 4, 5]
+                case "weekends": job.days = [6, 7]
+                default:
+                    job.days = try days.split(separator: ",").map { day in
+                        guard let index = BackupJob.dayNames.firstIndex(where: { $0.lowercased() == day.lowercased().prefix(3) }) else {
+                            throw ProxmacsError("Unknown day \(day)")
+                        }
+                        return index + 1
+                    }
+                }
+            }
+            if let vms = option("--vms") { job.selection = .include; job.vms = vms.split(separator: ",").map(String.init) }
+            if let vms = option("--exclude") { job.selection = .exclude; job.vms = vms.split(separator: ",").map(String.init) }
+            if let notify = option("--notify") {
+                guard let value = NotifyWhen(rawValue: notify) else { throw ProxmacsError("--notify takes never, failure or always") }
+                job.notify = value
+            }
+            job.comment = option("--comment") ?? ""
+            if let value = option("--to") {
+                guard let target = TargetStore.target(value) else { throw ProxmacsError("No backup target \(value)") }
+                job.target = target.id
+            }
+            try JobStore.upsert(job)
+            print("added job \(job.id): \(job.scheduleLabel)")
+        case "job-rm":
+            try JobStore.remove(try name())
+        case "job-run":
+            guard JobStore.job(try name()) != nil else { throw ProxmacsError("No job \(args[1])") }
+            await state.runJob(args[1])
+            if JobStore.job(args[1])?.lastOK != true { throw ProxmacsError(JobStore.job(args[1])?.lastMessage ?? "job failed") }
+
+        case "notify":
+            for target in NotificationStore.load() {
+                print([target.name, target.location, target.enabled ? "enabled" : "disabled", target.id].joined(separator: "\t"))
+            }
+        case "notify-add":
+            var target = NotificationTarget(name: try name())
+            if let format = option("--format") {
+                guard let value = NotificationTarget.Format(rawValue: format) else { throw ProxmacsError("Unknown format \(format)") }
+                target.format = value
+            }
+            try NotificationStore.upsert(target, url: prompt("Webhook URL: "))
+            print("added webhook \(target.name)")
+        case "notify-rm":
+            guard let target = NotificationStore.target(try name()) else { throw ProxmacsError("No notification target \(args[1])") }
+            try NotificationStore.remove(target.id)
+        case "notify-test":
+            guard let target = NotificationStore.target(try name()) else { throw ProxmacsError("No notification target \(args[1])") }
+            try await Notifier.send(target, title: "Proxmacs test notification",
+                                    message: "Notifications from \(ProcessInfo.processInfo.hostName) reach this target.", failed: false)
+            print("sent")
 
         case "create":
             let vm = try name()
@@ -202,11 +397,18 @@ enum CLI {
         case "start":
             await state.start(try name()); try check()
         case "stop":
-            await state.stop(try name()); try check()
+            await state.stop(try name(), force: args.contains("--force")); try check()
+        case "reboot":
+            await state.reboot(try name(), force: args.contains("--force")); try check()
         case "delete":
             await state.delete(try name()); try check()
         case "backup":
-            await state.backup(try name()); try check()
+            let target = try option("--to").map { value in
+                guard let target = TargetStore.target(value) else { throw ProxmacsError("No backup target \(value)") }
+                return target.id
+            }
+            if target != nil { printProgress(state) }
+            await state.backup(try name(), to: target); try check()
 
         case "ip":
             let vm = try name()
@@ -296,6 +498,15 @@ enum CLI {
             guard let id else { throw ProxmacsError("no snapshots of \(vm) on \(target.name)") }
             printProgress(state)
             await state.pull(vm, snapshotID: id, targetID: target.id); try check()
+
+        case "verify":
+            guard args.count > 2, let target = TargetStore.target(args[1]) else { throw ProxmacsError(usage) }
+            let vm = args[2]
+            var id = args.count > 3 ? args[3] : nil
+            if id == nil { id = try await state.remoteSnapshots(targetID: target.id, vm: vm).first?.id }
+            guard let id else { throw ProxmacsError("no snapshots of \(vm) on \(target.name)") }
+            printProgress(state)
+            await state.verify(vm, snapshotID: id, targetID: target.id); try check()
 
         case "storage":
             if args.count == 1 {

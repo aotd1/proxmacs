@@ -126,7 +126,7 @@ a { color: var(--accent); }
 }
 .icon-btn:hover { background: var(--hover); color: var(--text); }
 
-input[type=text], input[type=password], input[type=number], input[type=url], select, textarea {
+input[type=text], input[type=password], input[type=number], input[type=url], input[type=search], input[type=time], select, textarea {
   font: inherit; color: var(--text); background: var(--input-bg);
   border: 1px solid var(--border-strong); border-radius: var(--radius);
   height: 28px; padding: 0 8px; min-width: 0;
@@ -403,7 +403,7 @@ fieldset { border: none; padding: 0; margin: 0; min-width: 0; }
 @media (pointer: coarse) {
   .btn { height: 34px; }
   .btn.small { height: 30px; padding: 0 10px; }
-  input[type=text], input[type=password], input[type=number], input[type=url], select { height: 36px; font-size: 16px; }
+  input[type=text], input[type=password], input[type=number], input[type=url], input[type=search], input[type=time], select { height: 36px; font-size: 16px; }
   textarea { font-size: 16px; }
   select.small { height: 30px; font-size: 14px; }
   .tree-item { padding-top: 9px; padding-bottom: 9px; }
@@ -527,3 +527,55 @@ input.narrow { width: 90px; }
 .radio-row .hint { color: var(--muted); font-size: 12px; }
 .storage-indicator { height: 28px; }
 .dot.offline { background: var(--muted); }
+
+/* menu button */
+.menu-wrap { position: relative; display: inline-flex; }
+.caret { display: inline-block; width: 6px; height: 6px; border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor;
+  transform: rotate(45deg); margin: -3px 0 0 2px; }
+.menu {
+  position: absolute; top: calc(100% + 4px); z-index: 40; min-width: 200px; padding: 4px;
+  background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow);
+  display: flex; flex-direction: column;
+}
+.menu.left { left: 0; }
+.menu.right { right: 0; }
+.menu-item {
+  text-align: left; border: none; background: none; color: var(--text); font: inherit; padding: 6px 10px;
+  border-radius: 4px; cursor: pointer; white-space: nowrap;
+}
+.menu-item:hover:not(:disabled) { background: var(--hover); }
+.menu-item:disabled { opacity: .5; cursor: not-allowed; }
+.menu-item.danger { color: var(--err); }
+
+/* tags */
+.tags { display: inline-flex; flex-wrap: wrap; gap: 4px; }
+.tag { padding: 0 7px; border-radius: 9px; font-size: 11.5px; line-height: 18px; background: var(--info-bg); color: var(--accent); white-space: nowrap; }
+.tree-item .tags { flex: none; max-width: 45%; overflow: hidden; flex-wrap: nowrap; }
+.tree-filter { padding: 0 10px 8px; }
+.tree-filter input { width: 100%; }
+.dot.template { background: none; border: 2px solid var(--muted); border-radius: 2px; }
+
+/* metric charts */
+.charts { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 380px), 1fr)); gap: 16px; }
+.chart.metric { margin: 0; }
+.chart-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; margin-bottom: 6px; }
+.chart-head .legend { margin-top: 0; gap: 4px 12px; }
+.chart.metric svg { height: 110px; cursor: crosshair; }
+.chart .line.series-a { stroke: var(--seg-app); }
+.chart .line.series-b { stroke: var(--seg-wired); }
+.chart .line.series-c { stroke: var(--seg-compressed); }
+.chart .point { stroke: none; }
+.chart .point.series-a, .legend i.series-a { fill: var(--seg-app); background: var(--seg-app); }
+.chart .point.series-b, .legend i.series-b { fill: var(--seg-wired); background: var(--seg-wired); }
+.chart .point.series-c, .legend i.series-c { fill: var(--seg-compressed); background: var(--seg-compressed); }
+.chart .cursor { stroke: var(--muted); stroke-width: 1; vector-effect: non-scaling-stroke; }
+
+/* notes, guest */
+.notes { white-space: pre-wrap; overflow-wrap: anywhere; margin: 0; }
+.fs-row { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 0 12px; }
+.fs-row .meter { flex: 1 0 100%; margin-top: 2px; max-width: none; }
+.stack { display: grid; gap: 10px; }
+.days { display: flex; flex-wrap: wrap; gap: 6px 14px; }
+.vm-checks { display: flex; flex-wrap: wrap; gap: 6px 16px; max-height: 180px; overflow: auto; }
+.form-row .grow { flex: 1; min-width: min(100%, 220px); }
+.field > .segmented { align-self: flex-start; max-width: 100%; }

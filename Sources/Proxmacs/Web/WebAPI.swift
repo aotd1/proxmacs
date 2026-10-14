@@ -16,6 +16,8 @@ struct WebAPI: Sendable {
         registerVMs(router)
         registerBackups(router)
         registerTargets(router)
+        registerJobs(router)
+        registerNotifications(router)
         registerConsole(router)
     }
 
@@ -91,13 +93,16 @@ struct WebAPI: Sendable {
                 "osVersion": ProcessInfo.processInfo.operatingSystemVersionString,
                 "diskFreeBytes": values?.volumeAvailableCapacityForImportantUsage ?? 0,
                 "diskTotalBytes": values?.volumeTotalCapacity ?? 0,
+                "nestedVirtualization": HostStats.supportsNestedVirtualization,
                 "web": ["bind": settings.bind, "port": settings.port, "urls": listening],
             ])
         }
         router.get("/api/host/stats") { _, _ in
             let running = await MainActor.run { state.vms.filter(\.isRunning).map { $0.memoryMB ?? 0 } }
+            let cpu = await state.hostCPU
             var json: [String: Any] = [
                 "time": Date().ISO8601Format(),
+                "cpu": cpu as Any? ?? NSNull(),
                 "loadAverage": HostStats.loadAverage(),
                 "runningVMs": running.count,
                 "vmMemoryBytes": running.reduce(0) { $0 + UInt64($1) * 1024 * 1024 },
@@ -181,8 +186,16 @@ struct WebAPI: Sendable {
 
     // MARK: VMs
 
+    static func sampleJSON(_ sample: VMSample) -> [String: Any] {
+        func value(_ v: Double?) -> Any { v.map { $0 as Any } ?? NSNull() }
+        return ["t": Int(sample.time.timeIntervalSince1970 * 1000), "cpu": sample.cpu, "memory": sample.memory,
+                "guestUsed": value(sample.guestUsed), "guestTotal": value(sample.guestTotal),
+                "diskRead": sample.diskRead, "diskWrite": sample.diskWrite, "netIn": value(sample.netIn), "netOut": value(sample.netOut)]
+    }
+
     @MainActor
-    static func vmJSON(_ item: VMItem, activity: String?) -> [String: Any] {
+    static func vmJSON(_ item: VMItem, state: AppState) -> [String: Any] {
+        let activity = state.activity[item.name]
         var network: [String: Any] = ["mode": "nat", "interface": NSNull()]
         if case .bridged(let iface) = item.meta.network { network = ["mode": "bridged", "interface": iface] }
         let config = item.meta.effectiveCloudInit
@@ -198,15 +211,34 @@ struct WebAPI: Sendable {
             "name": item.name, "state": item.state, "ip": item.ip as Any? ?? NSNull(), "network": network,
             "cpus": item.cpus as Any? ?? NSNull(), "memoryMB": item.memoryMB as Any? ?? NSNull(), "diskGB": item.diskGB as Any? ?? NSNull(),
             "autostart": item.meta.autostart, "activity": activity as Any? ?? NSNull(),
-            "backup": ["daily": item.meta.backup.daily, "hour": item.meta.backup.hour, "keep": item.meta.backup.keep],
+            "backup": ["keep": item.meta.backup.keep, "keepDaily": item.meta.backup.keepDaily, "keepWeekly": item.meta.backup.keepWeekly,
+                       "keepMonthly": item.meta.backup.keepMonthly, "keepYearly": item.meta.backup.keepYearly],
             "offsite": ["targets": item.meta.offsite.targets, "auto": item.meta.offsite.auto],
+            "template": item.meta.template, "tags": item.meta.tags, "notes": item.meta.notes,
+            "startOrder": item.meta.startOrder as Any? ?? NSNull(), "startDelay": item.meta.startDelay,
+            "nested": item.meta.nested,
+            "disks": item.meta.disks.map { disk -> [String: Any] in
+                let url = Paths.tartVMDir(item.name).appending(path: disk.file)
+                return ["file": disk.file, "sizeGB": AppState.diskGB(url), "usedBytes": FileCopy.allocatedSize(of: url), "backup": disk.backup]
+            },
+            "shares": item.meta.shares.map { ["name": $0.name, "path": $0.path, "readOnly": $0.readOnly] },
+            "stats": Self.statsJSON(item, state: state),
         ]
+    }
+
+    @MainActor
+    private static func statsJSON(_ item: VMItem, state: AppState) -> Any {
+        guard item.isRunning else { return NSNull() }
+        var json: [String: Any] = [:]
+        if let sample = state.metrics.latest[item.name] { json = sampleJSON(sample) }
+        if let started = state.metrics.started[item.name] { json["uptime"] = Int(Date().timeIntervalSince(started)) }
+        return json.isEmpty ? NSNull() : json
     }
 
     private func registerVMs(_ router: Router<WebContext>) {
         let state = self.state
         router.get("/api/vms") { _, _ in
-            let list = await MainActor.run { state.vms.map { Self.vmJSON($0, activity: state.activity[$0.name]) } }
+            let list = await MainActor.run { state.vms.map { Self.vmJSON($0, state: state) } }
             return API.json(list)
         }
 
@@ -234,20 +266,119 @@ struct WebAPI: Sendable {
             }
         }
 
-        for action in ["start", "stop", "backup"] {
-            router.post("/api/vms/:name/\(action)") { _, context in
+        // stop = shut down (forced after 30 s), poweroff = turn off at once, reset = poweroff + start.
+        for action in ["start", "stop", "poweroff", "reboot", "reset", "backup"] {
+            router.post("/api/vms/:name/\(action)") { request, context in
                 await API.guarded {
                     let name = try await Self.requireVM(state, context)
+                    // backup: {"target": id} backs up straight to an offsite target instead of local backups.
+                    let target = action == "backup" ? try Self.backupTarget(try await API.body(request)["target"]) : nil
                     let task = Self.newTaskID()
                     Task { @MainActor in
                         switch action {
                         case "start": await state.start(name, taskID: task)
                         case "stop": await state.stop(name, taskID: task)
-                        default: await state.backup(name, taskID: task)
+                        case "poweroff": await state.stop(name, force: true, taskID: task)
+                        case "reboot": await state.reboot(name, taskID: task)
+                        case "reset": await state.reboot(name, force: true, taskID: task)
+                        default: await state.backup(name, to: target, taskID: task)
                         }
                     }
                     return API.json(["task": task], status: .accepted)
                 }
+            }
+        }
+
+        router.post("/api/vms/:name/clone") { request, context in
+            await API.guarded {
+                let source = try await Self.requireVM(state, context)
+                let body = try await API.body(request)
+                guard let name = body["name"] as? String else { throw APIError(message: "name is required") }
+                try await state.validateNewVM(name)
+                let network = (body["ipv4"] as? [String: Any]).map(Self.guestNetwork)
+                let start = body["start"] as? Bool ?? false
+                let task = Self.newTaskID()
+                Task { @MainActor in try? await state.clone(source, to: name, start: start, network: network, taskID: task) }
+                return API.json(["task": task], status: .accepted)
+            }
+        }
+
+        router.post("/api/vms/:name/template") { request, context in
+            await API.guarded {
+                let name = try await Self.requireVM(state, context)
+                let body = try await API.body(request)
+                try await state.setTemplate(name, body["template"] as? Bool ?? true)
+                return try await Self.currentVM(state, name)
+            }
+        }
+
+        router.post("/api/vms/:name/disks") { request, context in
+            await API.guarded {
+                let name = try await Self.requireVM(state, context)
+                let body = try await API.body(request)
+                guard let size = body["sizeGB"] as? Int else { throw APIError(message: "sizeGB is required") }
+                _ = try await state.addDisk(name, sizeGB: size)
+                return try await Self.currentVM(state, name)
+            }
+        }
+        router.put("/api/vms/:name/disks/:file") { request, context in
+            await API.guarded {
+                let name = try await Self.requireVM(state, context)
+                let file = try Self.param(context, "file")
+                let body = try await API.body(request)
+                if let size = body["sizeGB"] as? Int { try await state.resizeDisk(name, file: file, sizeGB: size) }
+                if let backup = body["backup"] as? Bool { try await state.setDiskBackup(name, file: file, backup: backup) }
+                return try await Self.currentVM(state, name)
+            }
+        }
+        router.delete("/api/vms/:name/disks/:file") { _, context in
+            await API.guarded {
+                let name = try await Self.requireVM(state, context)
+                try await state.removeDisk(name, file: try Self.param(context, "file"))
+                return try await Self.currentVM(state, name)
+            }
+        }
+        router.post("/api/vms/:name/shares") { request, context in
+            await API.guarded {
+                let name = try await Self.requireVM(state, context)
+                let body = try await API.body(request)
+                guard let share = body["name"] as? String, let path = body["path"] as? String else {
+                    throw APIError(message: "name and path are required")
+                }
+                try await state.addShare(name, SharedFolder(name: share, path: path, readOnly: body["readOnly"] as? Bool ?? false))
+                return try await Self.currentVM(state, name)
+            }
+        }
+        router.delete("/api/vms/:name/shares/:share") { _, context in
+            await API.guarded {
+                let name = try await Self.requireVM(state, context)
+                try await state.removeShare(name, name: try Self.param(context, "share"))
+                return try await Self.currentVM(state, name)
+            }
+        }
+
+        router.get("/api/vms/:name/metrics") { request, context in
+            await API.guarded {
+                let name = try await Self.requireVM(state, context)
+                let range = request.uri.queryParameters.get("range").flatMap(MetricsRange.init) ?? .hour
+                let samples = await MainActor.run { state.metrics.history(name, range: range) }
+                return API.json(["range": range.rawValue, "step": range.step, "samples": samples.map(Self.sampleJSON)])
+            }
+        }
+
+        router.get("/api/vms/:name/guest") { request, context in
+            await API.guarded {
+                let name = try await Self.requireVM(state, context)
+                let info = try await state.guestInfo(name, refresh: request.uri.queryParameters.get("refresh") == "1")
+                return API.json([
+                    "os": info.os as Any? ?? NSNull(), "kernel": info.kernel as Any? ?? NSNull(),
+                    "hostname": info.hostname as Any? ?? NSNull(), "uptime": info.uptime.map { Int($0) } as Any? ?? NSNull(),
+                    "updated": info.updated.ISO8601Format(),
+                    "interfaces": info.interfaces.map { ["name": $0.name, "mac": $0.mac as Any? ?? NSNull(), "addresses": $0.addresses] },
+                    "filesystems": info.filesystems.map {
+                        ["device": $0.device, "type": $0.type, "mount": $0.mount, "sizeBytes": $0.size, "usedBytes": $0.used]
+                    },
+                ])
             }
         }
 
@@ -265,7 +396,8 @@ struct WebAPI: Sendable {
                 let name = try await Self.requireVM(state, context)
                 let body = try await API.body(request)
                 let change = HardwareChange(cpus: body["cpus"] as? Int, memoryMB: body["memoryMB"] as? Int, diskGB: body["diskGB"] as? Int,
-                                            network: await Self.networkMode(body["network"] as? [String: Any]))
+                                            network: await Self.networkMode(body["network"] as? [String: Any]),
+                                            nested: body["nested"] as? Bool)
                 try await state.editHardware(name, change)
                 return try await Self.currentVM(state, name)
             }
@@ -294,21 +426,34 @@ struct WebAPI: Sendable {
                 let name = try await Self.requireVM(state, context)
                 let body = try await API.body(request)
                 let targetIDs = Set(TargetStore.load().map(\.id))
+                let tags = try (body["tags"] as? [Any]).map(Self.tags)
+                if let notes = body["notes"] as? String, notes.utf8.count > 16_384 { throw APIError(message: "Notes are too long") }
+                if let order = body["startOrder"] as? Int, !(0...9999).contains(order) { throw APIError(message: "Start order must be 0–9999") }
+                if let delay = body["startDelay"] as? Int, !(0...3600).contains(delay) { throw APIError(message: "Startup delay must be 0–3600 s") }
                 return try await MainActor.run {
+                    if body["autostart"] as? Bool == true, VMMeta.load(name)?.template == true {
+                        throw APIError(message: "Templates can't start on login")
+                    }
                     try state.updateMeta(name) { meta in
                         if let autostart = body["autostart"] as? Bool { meta.autostart = autostart }
                         if let backup = body["backup"] as? [String: Any] {
-                            if let daily = backup["daily"] as? Bool { meta.backup.daily = daily }
-                            if let hour = backup["hour"] as? Int { meta.backup.hour = min(max(hour, 0), 23) }
-                            if let keep = backup["keep"] as? Int { meta.backup.keep = max(keep, 1) }
+                            if let keep = backup["keep"] as? Int { meta.backup.keep = min(max(keep, 0), 9999) }
+                            if let keep = backup["keepDaily"] as? Int { meta.backup.keepDaily = min(max(keep, 0), 9999) }
+                            if let keep = backup["keepWeekly"] as? Int { meta.backup.keepWeekly = min(max(keep, 0), 9999) }
+                            if let keep = backup["keepMonthly"] as? Int { meta.backup.keepMonthly = min(max(keep, 0), 9999) }
+                            if let keep = backup["keepYearly"] as? Int { meta.backup.keepYearly = min(max(keep, 0), 9999) }
                         }
+                        if let tags { meta.tags = tags }
+                        if let notes = body["notes"] as? String { meta.notes = notes }
+                        if body.keys.contains("startOrder") { meta.startOrder = body["startOrder"] as? Int }
+                        if let delay = body["startDelay"] as? Int { meta.startDelay = delay }
                         if let offsite = body["offsite"] as? [String: Any] {
                             if let targets = offsite["targets"] as? [String] { meta.offsite.targets = targets.filter(targetIDs.contains) }
                             if let auto = offsite["auto"] as? Bool { meta.offsite.auto = auto }
                         }
                     }
                     guard let item = state.vms.first(where: { $0.name == name }) else { throw APIError.notFound("VM \(name)") }
-                    return API.json(Self.vmJSON(item, activity: state.activity[name]))
+                    return API.json(Self.vmJSON(item, state: state))
                 }
             }
         }
@@ -402,6 +547,16 @@ struct WebAPI: Sendable {
                 return API.json(snapshots.map { ["vm": $0.vm, "time": $0.time.ISO8601Format(), "id": $0.id] })
             }
         }
+        router.post("/api/targets/:id/verify") { request, context in
+            await API.guarded {
+                let id = try Self.param(context, "id")
+                let body = try await API.body(request)
+                guard let vm = body["vm"] as? String, let snapshot = body["id"] as? String else { throw APIError(message: "vm and id are required") }
+                let task = Self.newTaskID()
+                Task { @MainActor in await state.verify(vm, snapshotID: snapshot, targetID: id, taskID: task) }
+                return API.json(["task": task], status: .accepted)
+            }
+        }
         router.post("/api/targets/:id/pull") { request, context in
             await API.guarded {
                 let id = try Self.param(context, "id")
@@ -441,6 +596,139 @@ struct WebAPI: Sendable {
         }
     }
 
+    // MARK: Backup jobs
+
+    static func jobJSON(_ job: BackupJob, running: Bool) -> [String: Any] {
+        ["id": job.id, "enabled": job.enabled, "comment": job.comment, "title": job.title, "days": job.days,
+         "hour": job.hour, "minute": job.minute, "selection": job.selection.rawValue, "vms": job.vms,
+         "notify": job.notify.rawValue, "schedule": job.scheduleLabel, "running": running,
+         "target": job.target as Any? ?? NSNull(),
+         "targetName": job.target.flatMap { TargetStore.target($0)?.name } as Any? ?? NSNull(),
+         "nextRun": job.nextRun(after: Date())?.ISO8601Format() as Any? ?? NSNull(),
+         "lastRun": job.lastRun?.ISO8601Format() as Any? ?? NSNull(), "lastOK": job.lastOK as Any? ?? NSNull(),
+         "lastMessage": job.lastMessage as Any? ?? NSNull()]
+    }
+
+    static func parseJob(_ body: [String: Any], into job: inout BackupJob) throws {
+        let scheduleBefore = (job.days, job.hour, job.minute, job.enabled)
+        if let enabled = body["enabled"] as? Bool { job.enabled = enabled }
+        if let comment = body["comment"] as? String { job.comment = comment.trimmingCharacters(in: .whitespacesAndNewlines) }
+        if let days = body["days"] as? [Int] { job.days = Array(Set(days)).sorted() }
+        if let hour = body["hour"] as? Int { job.hour = hour }
+        if let minute = body["minute"] as? Int { job.minute = minute }
+        if let selection = body["selection"] as? String {
+            guard let value = BackupJob.Selection(rawValue: selection) else { throw APIError(message: "selection must be all, include or exclude") }
+            job.selection = value
+        }
+        if let vms = body["vms"] as? [String] { job.vms = vms }
+        if body.keys.contains("target") { job.target = try backupTarget(body["target"]) }
+        if let notify = body["notify"] as? String {
+            guard let value = NotifyWhen(rawValue: notify) else { throw APIError(message: "notify must be never, failure or always") }
+            job.notify = value
+        }
+        // A changed schedule starts counting from now, so it doesn't fire for a time already passed.
+        if scheduleBefore != (job.days, job.hour, job.minute, job.enabled) { job.since = Date() }
+        try job.validate()
+    }
+
+    private func registerJobs(_ router: Router<WebContext>) {
+        let state = self.state
+        router.get("/api/jobs") { _, _ in
+            let running = await state.runningJobs
+            return API.json(JobStore.load().map { Self.jobJSON($0, running: running.contains($0.id)) })
+        }
+        router.post("/api/jobs") { request, _ in
+            await API.guarded {
+                var job = BackupJob()
+                try Self.parseJob(try await API.body(request), into: &job)
+                try JobStore.upsert(job)
+                return API.json(Self.jobJSON(job, running: false), status: .created)
+            }
+        }
+        router.put("/api/jobs/:id") { request, context in
+            await API.guarded {
+                guard var job = JobStore.job(try Self.param(context, "id")) else { throw APIError.notFound("job") }
+                try Self.parseJob(try await API.body(request), into: &job)
+                try JobStore.upsert(job)
+                let running = await state.runningJobs.contains(job.id)
+                return API.json(Self.jobJSON(job, running: running))
+            }
+        }
+        router.delete("/api/jobs/:id") { _, context in
+            await API.guarded {
+                try JobStore.remove(try Self.param(context, "id"))
+                return API.noContent()
+            }
+        }
+        router.post("/api/jobs/:id/run") { _, context in
+            await API.guarded {
+                guard let job = JobStore.job(try Self.param(context, "id")) else { throw APIError.notFound("job") }
+                if await state.runningJobs.contains(job.id) { throw APIError(message: "\(job.title) is already running") }
+                let task = Self.newTaskID()
+                Task { @MainActor in await state.runJob(job.id, taskID: task) }
+                return API.json(["task": task], status: .accepted)
+            }
+        }
+    }
+
+    // MARK: Notifications
+
+    static func notificationJSON(_ target: NotificationTarget) -> [String: Any] {
+        ["id": target.id, "name": target.name, "enabled": target.enabled, "format": target.format.rawValue,
+         "host": target.host as Any? ?? NSNull(), "location": target.location]
+    }
+
+    /// Applies the request to `target`; returns the new webhook URL (nil = unchanged).
+    static func parseNotification(_ body: [String: Any], into target: inout NotificationTarget) throws -> String? {
+        if let name = body["name"] as? String { target.name = name.trimmingCharacters(in: .whitespaces) }
+        if let enabled = body["enabled"] as? Bool { target.enabled = enabled }
+        if let format = body["format"] as? String {
+            guard let value = NotificationTarget.Format(rawValue: format) else { throw APIError(message: "format must be json, discord, slack or ntfy") }
+            target.format = value
+        }
+        return (body["url"] as? String).map { $0.trimmingCharacters(in: .whitespaces) }.flatMap { $0.isEmpty ? nil : $0 }
+    }
+
+    private func registerNotifications(_ router: Router<WebContext>) {
+        router.get("/api/notifications") { _, _ in
+            API.json(NotificationStore.load().map(Self.notificationJSON))
+        }
+        router.post("/api/notifications") { request, _ in
+            await API.guarded {
+                var target = NotificationTarget(name: "")
+                let url = try Self.parseNotification(try await API.body(request), into: &target)
+                try NotificationStore.upsert(target, url: url)
+                return API.json(Self.notificationJSON(NotificationStore.target(target.id) ?? target), status: .created)
+            }
+        }
+        router.put("/api/notifications/:id") { request, context in
+            await API.guarded {
+                guard var target = NotificationStore.target(try Self.param(context, "id")) else { throw APIError.notFound("notification target") }
+                let url = try Self.parseNotification(try await API.body(request), into: &target)
+                try NotificationStore.upsert(target, url: url)
+                return API.json(Self.notificationJSON(NotificationStore.target(target.id) ?? target))
+            }
+        }
+        router.delete("/api/notifications/:id") { _, context in
+            await API.guarded {
+                try NotificationStore.remove(try Self.param(context, "id"))
+                return API.noContent()
+            }
+        }
+        router.post("/api/notifications/:id/test") { _, context in
+            await API.guarded {
+                guard let target = NotificationStore.target(try Self.param(context, "id")) else { throw APIError.notFound("notification target") }
+                do {
+                    try await Notifier.send(target, title: "Proxmacs test notification",
+                                            message: "Notifications from \(ProcessInfo.processInfo.hostName) reach this target.", failed: false)
+                    return API.json(["ok": true, "message": "Sent a test notification to \(target.name)"])
+                } catch {
+                    return API.json(["ok": false, "message": error.localizedDescription])
+                }
+            }
+        }
+    }
+
     // MARK: Console
 
     private func registerConsole(_ router: Router<WebContext>) {
@@ -476,7 +764,7 @@ struct WebAPI: Sendable {
     static func currentVM(_ state: AppState, _ name: String) async throws -> Response {
         try await MainActor.run {
             guard let item = state.vms.first(where: { $0.name == name }) else { throw APIError.notFound("VM \(name)") }
-            return API.json(vmJSON(item, activity: state.activity[name]))
+            return API.json(vmJSON(item, state: state))
         }
     }
 
@@ -498,6 +786,24 @@ struct WebAPI: Sendable {
         }
         return GuestNetwork(dhcp: false, address: trimmed(json["address"]), gateway: trimmed(json["gateway"]),
                             dns: ((json["dns"] as? [Any]) ?? []).compactMap(trimmed))
+    }
+
+    /// A backup destination from a request: null, "" or "local" = local backups, else an offsite target id.
+    static func backupTarget(_ value: Any?) throws -> String? {
+        guard let id = value as? String, !id.isEmpty, id != "local" else { return nil }
+        guard let target = TargetStore.target(id) else { throw APIError.notFound("backup target") }
+        return target.id
+    }
+
+    static func tags(_ list: [Any]) throws -> [String] {
+        var result: [String] = []
+        for case let tag as String in list {
+            let tag = tag.trimmingCharacters(in: .whitespaces).lowercased()
+            if tag.isEmpty || result.contains(tag) { continue }
+            guard VMMeta.isValidTag(tag) else { throw APIError(message: "Tags are lowercase letters, digits and . _ + - (up to 32)") }
+            result.append(tag)
+        }
+        return result
     }
 
     static func keys(_ list: [Any]) -> [String] {

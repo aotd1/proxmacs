@@ -3,12 +3,13 @@ import { api, AuthError, enc, errorMessage } from '../../api';
 import { useConfirm } from '../../components/Modal';
 import { useToast } from '../../components/Toasts';
 import { ActionButton, Badge, Empty, Loading, Panel, Spinner } from '../../components/ui';
-import { fmtDate, pad2 } from '../../format';
+import type { Navigate } from '../../components/Shell';
+import { fmtDate } from '../../format';
 import { useApp } from '../../store';
 import type { Backup, BackupPolicy, VM } from '../../types';
-import { vmBackup } from './actions';
+import { BackupButton } from './BackupDialog';
 
-export function BackupsView({ vm }: { vm: VM }) {
+export function BackupsView({ vm, navigate }: { vm: VM; navigate: Navigate }) {
   const app = useApp();
   const confirm = useConfirm();
   const { toast, report } = useToast();
@@ -67,11 +68,14 @@ export function BackupsView({ vm }: { vm: VM }) {
   const running = vm.state === 'running';
   return (
     <>
-      <Panel title="Schedule"><ScheduleForm vm={vm} /></Panel>
+      <div className="grid2">
+        <Panel title="Backup jobs"><JobList vm={vm} navigate={navigate} /></Panel>
+        <Panel title="Retention"><RetentionForm vm={vm} /></Panel>
+      </div>
       <Panel title="Local backups" flush extra={
         <div className="actions">
           <ActionButton className="small" onClick={load}>Refresh</ActionButton>
-          <ActionButton className="primary small" disabled={vm.state === 'missing' || vm.state === 'offline'} onClick={() => vmBackup(app.startTask, vm)}>Back up now</ActionButton>
+          <BackupButton vm={vm} className="primary small" />
         </div>
       }>
         {error ? <Empty error>{error}</Empty> : !backups ? <Loading what="Loading backups…" /> : !backups.length ? <Empty>No local backups yet.</Empty> : (
@@ -107,7 +111,33 @@ export function BackupsView({ vm }: { vm: VM }) {
   );
 }
 
-function ScheduleForm({ vm }: { vm: VM }) {
+function JobList({ vm, navigate }: { vm: VM; navigate: Navigate }) {
+  const app = useApp();
+  const jobs = app.jobs.filter((j) => j.selection === 'all' || (j.selection === 'include') === j.vms.includes(vm.name));
+  return (
+    <>
+      {!jobs.length ? <p className="muted">No backup job includes {vm.name}: it is only backed up when you click Back up now.</p> : (
+        <ul className="web-urls">
+          {jobs.map((j) => (
+            <li key={j.id}>
+              <strong>{j.title}</strong> <span className="muted">{j.enabled ? j.schedule : 'disabled'} → {j.targetName ?? 'local backups'}</span>
+              {j.lastRun && <div className="small muted">Last run {fmtDate(j.lastRun)}: {j.lastOK ? 'OK' : 'failed'}</div>}
+            </li>
+          ))}
+        </ul>
+      )}
+      <p className="spaced">
+        <button type="button" className="link" onClick={() => navigate({ type: 'host', tab: 'jobs' })}>Manage backup jobs</button>
+      </p>
+    </>
+  );
+}
+
+const KEEPS: [keyof BackupPolicy, string][] = [
+  ['keep', 'Last'], ['keepDaily', 'Daily'], ['keepWeekly', 'Weekly'], ['keepMonthly', 'Monthly'], ['keepYearly', 'Yearly'],
+];
+
+function RetentionForm({ vm }: { vm: VM }) {
   const app = useApp();
   const { toast, report } = useToast();
   const [edits, setEdits] = useState<Partial<BackupPolicy>>({});
@@ -120,7 +150,7 @@ function ScheduleForm({ vm }: { vm: VM }) {
     try {
       app.updateVM(await api<VM>('PATCH', `/api/vms/${enc(vm.name)}`, { backup: policy }));
       setEdits({});
-      toast('Backup schedule saved', 'ok');
+      toast('Retention saved', 'ok');
     } catch (err) {
       report(err);
     } finally {
@@ -131,24 +161,19 @@ function ScheduleForm({ vm }: { vm: VM }) {
   return (
     <form onSubmit={submit}>
       <div className="form-row">
-        <label className="check tall">
-          <input type="checkbox" className="switch" checked={policy.daily} onChange={(e) => setEdits({ ...edits, daily: e.target.checked })} />
-          Daily backup
-        </label>
-        <label className="field">
-          <span>At</span>
-          <select value={policy.hour} disabled={!policy.daily} onChange={(e) => setEdits({ ...edits, hour: parseInt(e.target.value, 10) })}>
-            {Array.from({ length: 24 }, (_, i) => <option key={i} value={i}>{pad2(i)}:00</option>)}
-          </select>
-        </label>
-        <label className="field">
-          <span>Keep</span>
-          <input type="number" className="narrow" min={1} max={999} step={1} required value={policy.keep}
-            onChange={(e) => setEdits({ ...edits, keep: parseInt(e.target.value, 10) || 1 })} />
-        </label>
+        {KEEPS.map(([key, label]) => (
+          <label key={key} className="field">
+            <span>{label}</span>
+            <input type="number" className="narrow" min={0} max={9999} step={1} required value={policy[key]}
+              onChange={(e) => setEdits({ ...edits, [key]: parseInt(e.target.value, 10) || 0 })} />
+          </label>
+        ))}
         <button type="submit" className="btn primary" disabled={busy || !Object.keys(edits).length}>{busy && <Spinner />}Save</button>
       </div>
-      <p className="muted small spaced">Keep = number of local backups retained; older ones are pruned automatically.</p>
+      <p className="muted small spaced">
+        After each backup, older ones are pruned like on a Proxmox Backup Server: keep the last N, plus the newest backup of
+        each of the last N days, weeks, months and years. 0 turns an option off; all 0 keeps everything.
+      </p>
     </form>
   );
 }

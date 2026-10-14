@@ -12,12 +12,28 @@ A Proxmox-flavoured menubar VM manager for Apple Silicon Macs, built on [Tart](h
   Provisioned with cloud-init: user (default: the distribution's, e.g. `debian`, `ubuntu`, `rocky`; passwordless sudo),
   SSH keys (default: your `~/.ssh/*.pub`), an optional console password (stored only as a SHA-512 crypt hash), DHCP or a
   static IPv4, and tart-guest-agent (.deb or .rpm).
-- **Editing VMs**: CPUs, memory, disk (grow only; the root filesystem grows on next boot) and network while stopped.
+- **Editing VMs**: CPUs, memory, disk (grow only; the root filesystem grows on next boot), network and nested
+  virtualization (Apple M3 or later) while stopped.
   Cloud-init settings (user, password, SSH keys, IP) can be changed any time: the seed is rebuilt with a new
   instance-id and cloud-init re-applies them on the next start. `authorized_keys` ends up exactly as configured, and
   SSH host keys are kept.
+- **Extra disks and shared folders**: sparse extra disks (`/dev/vdb`, …; included in backups unless turned off) and
+  host folders shared over virtiofs, mounted in the guest at `/mnt/shared/<name>` on every boot (optionally read-only).
+- **Clones and templates**: clone any VM, even a running one (its filesystem is frozen for the instant APFS copy),
+  with all its disks. The clone gets a new MAC address, and on first boot new SSH host keys and machine-id; a static
+  address has to be changed in the clone dialog. Templates can't be started, only cloned.
+- **Power**: shutdown (forced after 30 s), stop (at once), reboot through the guest agent, and reset.
+- **Monitoring**: per-VM CPU, memory, network and disk I/O charts (last hour, day or week) from the VM's process on
+  the host and the guest agent, which also reports the guest's OS, addresses and filesystems. Host CPU usage.
+- **Organization**: tags (filter the VM list by name or tag), notes, and start order with startup delays for VMs that
+  start on login.
 - **Backups**: instant APFS clones. When the guest agent is reachable, the root filesystem is frozen during the clone.
-  Daily schedule and retention can be set per VM.
+  Backup jobs (Host → Backup Jobs) back up all, selected or all-but-excluded VMs on chosen days at a set time; a run
+  missed while the Mac slept is made up within 12 hours. Jobs and Back up now go to local backups or straight to an
+  offsite target (SMB or PBS, without a local copy). Retention per VM works like PBS prune: keep the last N, plus
+  daily, weekly, monthly and yearly backups.
+- **Notifications**: backup jobs post to webhooks (Discord, Slack, ntfy.sh or a self-hosted ntfy, or generic JSON) on
+  failure or after every run.
 - **External storage**: VM disks and local backups can each live on an external APFS drive (Host → Storage, or
   `cli storage`). Existing VMs and backups are moved along, and disk images stay sparse. While a drive is unplugged,
   its VMs show as *offline* and nothing is written in its place.
@@ -26,6 +42,7 @@ A Proxmox-flavoured menubar VM manager for Apple Silicon Macs, built on [Tart](h
   - **Proxmox Backup Server**: a native Swift client for the PBS backup/reader protocols (HTTP/2 upgrade,
     `disk.img.fidx` + blobs, zstd), authenticated with an API token and certificate fingerprint pinning.
   - Pull a remote snapshot back into local backups. If the VM no longer exists, pulling recreates it.
+  - Verify a remote snapshot: every chunk is read back and its digest checked.
 - **Web UI**, Proxmox-style, at `https://<mac>:8006` (React + TypeScript, in `web/`): password login, VM list,
   actions and editing, host memory usage (Activity Monitor's breakdown, pressure, swap, memory assigned to running
   VMs, live chart), task log, backups/offsite management, and a browser serial console (xterm.js over WebSocket).
@@ -100,8 +117,28 @@ $P cli create db1 --nat --user admin --ssh-keys ~/.ssh/id_ed25519.pub --ip 192.1
 $P cli edit web1 --cpus 4 --memory 8192 --disk 40      # VM stopped
 $P cli edit web1 --password --dhcp                     # prompts; applied on next start
 $P cli list
+$P cli info web1                                       # settings, usage, guest OS, addresses, filesystems
+$P cli reboot web1                                     # stop --force / reboot --force: turn off / reset
+$P cli disk-add web1 50                                # VM stopped; /dev/vdb in the guest
+$P cli share-add web1 src ~/src --ro                   # VM stopped; /mnt/shared/src in the guest
+$P cli set web1 --tags web,prod --autostart on --order 1 --delay 30 --nested on
+$P cli clone web1 web2 --start --ip 192.168.64.51/24   # or --dhcp; a running source is fine
+$P cli template base && $P cli clone base app2         # templates can only be cloned
 $P cli backup web1 && $P cli backups web1
+$P cli backup web1 --to pbs1                           # straight to an offsite target, no local backup
 $P cli stop web1 && $P cli restore web1 0 && $P cli start web1
+```
+
+### Backup jobs and notifications
+
+```bash
+$P cli set web1 --keep-last 3 --keep-daily 7 --keep-weekly 4 --keep-monthly 6   # retention (PBS prune semantics)
+$P cli job-add --at 02:30 --days weekdays --exclude scratch --notify failure --comment Nightly
+$P cli job-add --at 04:00 --days sun --to pbs1 --comment "Weekly to PBS"       # destination: an offsite target
+$P cli jobs && $P cli job-run <id>
+$P cli notify-add discord --format discord             # prompts for the webhook URL (kept secret)
+$P cli notify-add phone --format ntfy                  # e.g. https://ntfy.sh/<long-random-topic>
+$P cli notify-test phone
 ```
 
 ### Offsite
@@ -114,6 +151,7 @@ $P cli target-test pbs1
 $P cli push web1 pbs1            # newest local backup → PBS
 $P cli remote pbs1 web1          # list snapshots
 $P cli pull pbs1 web1            # newest snapshot → local backups (recreates web1 if it's gone)
+$P cli verify pbs1 web1          # read the newest snapshot back and check every chunk
 ```
 
 The PBS token needs `DatastoreBackup` on the datastore, or the namespace if you use one. Pruning remote
@@ -168,13 +206,15 @@ certificate (`tls` false, `bind` 127.0.0.1), for a full install. Icons are gener
 | --- | --- |
 | `~/Library/Application Support/Proxmacs/images/` | cached base images (`<id>-arm64.raw`, imported `*.raw`) and the agent `.deb`/`.rpm` |
 | `~/Library/Application Support/Proxmacs/vms/<name>/` | `meta.json` (incl. cloud-init settings), `seed.iso` (cloud-init), `run.log`, `console.log` |
-| `~/Library/Application Support/Proxmacs/backups/<name>/<timestamp>/` | cloned `disk.img`, `nvram.bin`, `config.json` (or `<backup storage>/<name>/…`) |
+| `~/Library/Application Support/Proxmacs/backups/<name>/<timestamp>/` | cloned `disk.img`, extra disks, `nvram.bin`, `config.json` (or `<backup storage>/<name>/…`) |
 | `~/Library/Application Support/Proxmacs/storage.json` | custom VM / backup storage locations |
 | `~/Library/Application Support/Proxmacs/offsite.json` | offsite targets |
-| `~/Library/Application Support/Proxmacs/secrets.json` | SMB passwords, PBS token secrets, web password hash (mode 0600) |
+| `~/Library/Application Support/Proxmacs/jobs.json` | backup jobs |
+| `~/Library/Application Support/Proxmacs/notifications.json` | notification webhooks (URLs are in `secrets.json`) |
+| `~/Library/Application Support/Proxmacs/secrets.json` | SMB passwords, PBS token secrets, webhook URLs, web password hash (mode 0600) |
 | `~/Library/Application Support/Proxmacs/web.json` | web UI settings |
 | `~/Library/Application Support/Proxmacs/web/` | self-signed `cert.pem` / `key.pem` |
-| `~/.tart/vms/<name>/` | Tart's VM (owned by Tart), or `<VM storage>/vms/<name>/` |
+| `~/.tart/vms/<name>/` | Tart's VM (owned by Tart) plus extra disks `disk<N>.img`, or `<VM storage>/vms/<name>/` |
 | `~/Library/LaunchAgents/dev.proxmacs.vm.<name>.plist` | per-VM runner |
 
 ## Uninstall
@@ -204,5 +244,12 @@ and snapshots already pushed to SMB or PBS are left alone.
 - Local backups protect against mistakes, not disk failure, unless they're on another drive. Push them offsite
   (SMB/PBS) for real protection.
 - Shut VMs down before ejecting a drive that holds their disks.
+- Backups freeze only the guest's root filesystem; filesystems on extra disks are crash-consistent.
+- Usage history is kept in memory, so charts start over when Proxmacs restarts. Guest network and memory figures
+  need the guest agent.
+- Mounting shared folders and the clone identity reset come with the cloud-init seed. VMs restored
+  without a seed (recreated from a backup) mount shares only by hand:
+  `sudo mount -t virtiofs com.apple.virtio-fs.automount /mnt/shared`.
+- Tart can't combine NAT and bridged networking in one VM, so VMs have a single network card.
 - Secrets are kept in an owner-only file rather than the Keychain: the login Keychain prompts after every rebuild
   of an ad-hoc-signed binary.

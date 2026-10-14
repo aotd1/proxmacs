@@ -12,10 +12,59 @@ enum NetworkMode: Codable, Hashable {
     }
 }
 
+/// Local backup retention (PBS-style prune options; 0 = option off). Schedules live in backup jobs.
 struct BackupPolicy: Codable, Hashable {
+    /// Per-VM daily schedule of older versions, migrated into a backup job (see BackupJobs.migrate).
     var daily = false
     var hour = 3
+    /// Keep the newest N backups.
     var keep = 5
+    var keepDaily = 0
+    var keepWeekly = 0
+    var keepMonthly = 0
+    var keepYearly = 0
+
+    init() {}
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        daily = try c.decodeIfPresent(Bool.self, forKey: .daily) ?? false
+        hour = try c.decodeIfPresent(Int.self, forKey: .hour) ?? 3
+        keep = try c.decodeIfPresent(Int.self, forKey: .keep) ?? 5
+        keepDaily = try c.decodeIfPresent(Int.self, forKey: .keepDaily) ?? 0
+        keepWeekly = try c.decodeIfPresent(Int.self, forKey: .keepWeekly) ?? 0
+        keepMonthly = try c.decodeIfPresent(Int.self, forKey: .keepMonthly) ?? 0
+        keepYearly = try c.decodeIfPresent(Int.self, forKey: .keepYearly) ?? 0
+    }
+
+    var label: String {
+        let parts = [(keep, "last"), (keepDaily, "daily"), (keepWeekly, "weekly"), (keepMonthly, "monthly"), (keepYearly, "yearly")]
+            .filter { $0.0 > 0 }.map { "\($0.0) \($0.1)" }
+        return parts.isEmpty ? "keep all" : "keep " + parts.joined(separator: ", ")
+    }
+}
+
+/// An additional disk image in the VM's Tart directory, attached after the root disk (/dev/vdb, …).
+struct ExtraDisk: Codable, Hashable {
+    /// File name in the Tart VM directory, e.g. disk1.img.
+    var file: String
+    /// Included in local backups (and so offsite pushes) and restores.
+    var backup = true
+
+    static func isValidFile(_ name: String) -> Bool {
+        name.range(of: #"^disk[1-9][0-9]?\.img$"#, options: .regularExpression) != nil
+    }
+}
+
+/// A host folder shared with the guest over virtiofs; the guest mounts it at /mnt/shared/<name>.
+struct SharedFolder: Codable, Hashable {
+    var name: String
+    var path: String
+    var readOnly = false
+
+    static func isValidName(_ name: String) -> Bool {
+        name.range(of: #"^[A-Za-z0-9][A-Za-z0-9_.-]{0,62}$"#, options: .regularExpression) != nil
+    }
 }
 
 struct OffsitePolicy: Codable, Hashable {
@@ -134,6 +183,20 @@ struct VMMeta: Codable, Hashable {
     var seedPending = false
     /// What the VM was created from (image name); nil for VMs created by older versions.
     var image: String?
+    /// Templates can't be started, only cloned.
+    var template = false
+    var tags: [String] = []
+    var notes = ""
+    /// Start-on-login sequence: lower first; nil = after the ordered VMs.
+    var startOrder: Int?
+    /// Seconds to wait after starting this VM at login before starting the next in order.
+    var startDelay = 0
+    var disks: [ExtraDisk] = []
+    var shares: [SharedFolder] = []
+    /// Nested virtualization (Apple M3 or later).
+    var nested = false
+    /// The next boot regenerates SSH host keys and machine-id (set on clones); cleared when the VM starts.
+    var newIdentity = false
 
     var effectiveCloudInit: CloudInitConfig { cloudInit ?? .legacy }
 
@@ -155,6 +218,19 @@ struct VMMeta: Codable, Hashable {
         cloudInit = try c.decodeIfPresent(CloudInitConfig.self, forKey: .cloudInit)
         seedPending = try c.decodeIfPresent(Bool.self, forKey: .seedPending) ?? false
         image = try c.decodeIfPresent(String.self, forKey: .image)
+        template = try c.decodeIfPresent(Bool.self, forKey: .template) ?? false
+        tags = try c.decodeIfPresent([String].self, forKey: .tags) ?? []
+        notes = try c.decodeIfPresent(String.self, forKey: .notes) ?? ""
+        startOrder = try c.decodeIfPresent(Int.self, forKey: .startOrder)
+        startDelay = try c.decodeIfPresent(Int.self, forKey: .startDelay) ?? 0
+        disks = try c.decodeIfPresent([ExtraDisk].self, forKey: .disks) ?? []
+        shares = try c.decodeIfPresent([SharedFolder].self, forKey: .shares) ?? []
+        nested = try c.decodeIfPresent(Bool.self, forKey: .nested) ?? false
+        newIdentity = try c.decodeIfPresent(Bool.self, forKey: .newIdentity) ?? false
+    }
+
+    static func isValidTag(_ tag: String) -> Bool {
+        tag.range(of: #"^[a-z0-9][a-z0-9_.+-]{0,31}$"#, options: .regularExpression) != nil
     }
 
     static func load(_ name: String) -> VMMeta? {

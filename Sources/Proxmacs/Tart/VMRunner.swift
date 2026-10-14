@@ -27,9 +27,16 @@ enum VMRunner {
         guard var meta = VMMeta.load(vm) else { throw ProxmacsError("No VM named \(vm)") }
         guard let tart = Tart.locate() else { throw ProxmacsError("tart not found") }
         try waitForStorage()
-        if meta.seedPending {
+        let manual = FileManager.default.fileExists(atPath: LaunchAgent.manualStartMarker(vm).path)
+        try? FileManager.default.removeItem(at: LaunchAgent.manualStartMarker(vm))
+        if !manual, let delay = startDelay(before: meta), delay > 0 {
+            print("proxmacs: start order: waiting \(delay) s")
+            Thread.sleep(forTimeInterval: TimeInterval(delay))
+        }
+        if meta.seedPending || meta.newIdentity {
             // This boot picks up the rebuilt seed.
             meta.seedPending = false
+            meta.newIdentity = false
             try? meta.save()
         }
 
@@ -69,6 +76,16 @@ enum VMRunner {
         print("proxmacs: tart exited with status \(process.terminationStatus)")
         _ = slave  // keep the slave open for the VM's whole lifetime
         exit(process.terminationStatus)
+    }
+
+    /// At login every start-on-login VM is launched at once; each waits for the startup delays of the
+    /// VMs ordered before it.
+    static func startDelay(before meta: VMMeta) -> Int? {
+        let ordered = VMMeta.allNames().compactMap(VMMeta.load).filter { $0.autostart && !$0.template }
+            .sorted { ($0.startOrder ?? Int.max, $0.name) < ($1.startOrder ?? Int.max, $1.name) }
+        guard let index = ordered.firstIndex(where: { $0.name == meta.name }) else { return nil }
+        return ordered[..<index].filter { $0.startOrder != nil && $0.startOrder != meta.startOrder }
+            .reduce(0) { $0 + max($1.startDelay, 0) }
     }
 
     /// At login an external drive may mount after the LaunchAgent starts: give it a few minutes.

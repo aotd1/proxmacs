@@ -1,26 +1,32 @@
 import { lazy, Suspense, useEffect, useState, type ReactNode } from 'react';
 import { fmtDate, fmtDuration, plural, timeFmt } from '../format';
-import { routeHash, useHashRoute, type Route } from '../hooks';
+import { routeHash, useHashRoute, useLocalStorage, type Route } from '../hooks';
 import { useApp } from '../store';
 import type { Task } from '../types';
 import { CreateVMDialog } from '../views/CreateVM';
 import { HostSummary } from '../views/host/HostSummary';
 import { ImagesView } from '../views/host/Images';
+import { JobsView } from '../views/host/Jobs';
+import { NotificationsView } from '../views/host/Notifications';
 import { StorageView } from '../views/host/Storage';
 import { TargetsView } from '../views/host/Targets';
 import { BackupsView } from '../views/vm/Backups';
 import { CloudInitView } from '../views/vm/CloudInit';
 import { HardwareView } from '../views/vm/Hardware';
 import { OffsiteView } from '../views/vm/Offsite';
+import { OptionsView } from '../views/vm/Options';
 import { VMSummary } from '../views/vm/Summary';
-import { Badge, Loading, Spinner, StateBadge, StateDot } from './ui';
+import { Badge, Loading, Spinner, StateBadge, StateDot, Tags } from './ui';
 
 // xterm is large; load it with the console tab.
 const ConsoleView = lazy(() => import('../views/vm/Console').then((m) => ({ default: m.ConsoleView })));
 
-const HOST_TABS = [['summary', 'Summary'], ['storage', 'Storage'], ['targets', 'Backup Targets'], ['images', 'Images']] as const;
+const HOST_TABS = [
+  ['summary', 'Summary'], ['storage', 'Storage'], ['jobs', 'Backup Jobs'], ['targets', 'Backup Targets'],
+  ['notifications', 'Notifications'], ['images', 'Images'],
+] as const;
 const VM_TABS = [
-  ['summary', 'Summary'], ['hardware', 'Hardware'], ['cloudinit', 'Cloud-Init'],
+  ['summary', 'Summary'], ['hardware', 'Hardware'], ['cloudinit', 'Cloud-Init'], ['options', 'Options'],
   ['console', 'Console'], ['backups', 'Backups'], ['offsite', 'Offsite'],
 ] as const;
 
@@ -118,9 +124,18 @@ function Topbar({ onCreate, onLogout, navigate, navOpen, onToggleNav }: {
 }
 
 function Tree({ route, navigate, open, onLogout }: { route: Route; navigate: Navigate; open: boolean; onLogout: () => void }) {
-  const { host, vms } = useApp();
+  const { host, vms: all } = useApp();
+  const [filter, setFilter] = useLocalStorage('proxmacs.treeFilter', '');
+  const terms = filter.toLowerCase().split(/[\s,]+/).filter(Boolean);
+  const vms = terms.length ? all.filter((vm) => terms.every((t) => vm.name.includes(t) || vm.tags.some((tag) => tag.includes(t)))) : all;
   return (
     <nav className={`tree-panel${open ? ' open' : ''}`} aria-label="Resources">
+      {(all.length > 5 || filter) && (
+        <div className="tree-filter">
+          <input type="search" placeholder="Filter by name or tag" aria-label="Filter VMs" value={filter}
+            onChange={(e) => setFilter(e.target.value)} />
+        </div>
+      )}
       <ul className="tree" role="tree">
         <li role="treeitem" aria-expanded="true">
           <button type="button" className={`tree-item${route.type === 'host' ? ' selected' : ''}`}
@@ -129,16 +144,17 @@ function Tree({ route, navigate, open, onLogout }: { route: Route; navigate: Nav
             <span className="label">{host?.hostname || 'Host'}</span>
           </button>
           <ul role="group">
-            {vms.length === 0 && <li className="tree-empty">No VMs</li>}
+            {vms.length === 0 && <li className="tree-empty">{all.length ? 'No matching VMs' : 'No VMs'}</li>}
             {vms.map((vm) => {
               const selected = route.type === 'vm' && route.name === vm.name;
               return (
                 <li key={vm.name} role="treeitem">
                   <button type="button" className={`tree-item${selected ? ' selected' : ''}`}
-                    title={`${vm.name} — ${vm.state}${vm.activity ? ` (${vm.activity})` : ''}`}
+                    title={`${vm.name} — ${vm.template ? 'template' : vm.state}${vm.activity ? ` (${vm.activity})` : ''}${vm.tags.length ? ` · ${vm.tags.join(', ')}` : ''}`}
                     onClick={() => navigate({ type: 'vm', name: vm.name, tab: route.type === 'vm' ? route.tab : 'summary' })}>
-                    <StateDot state={vm.state} />
+                    {vm.template ? <span className="dot template" /> : <StateDot state={vm.state} />}
                     <span className="label">{vm.name}</span>
+                    <span className="wide-only"><Tags tags={vm.tags.slice(0, 2)} /></span>
                     {vm.activity && <Spinner title={vm.activity} />}
                   </button>
                 </li>
@@ -162,16 +178,22 @@ function Content({ route, navigate }: { route: Route; navigate: Navigate }) {
 
   let body: ReactNode = null;
   if (route.type === 'host') {
-    body = route.tab === 'targets' ? <TargetsView /> : route.tab === 'images' ? <ImagesView />
-      : route.tab === 'storage' ? <StorageView /> : <HostSummary navigate={navigate} />;
+    body = {
+      storage: <StorageView />,
+      jobs: <JobsView navigate={navigate} />,
+      targets: <TargetsView />,
+      notifications: <NotificationsView />,
+      images: <ImagesView />,
+    }[route.tab] ?? <HostSummary navigate={navigate} />;
   } else if (vm) {
     const props = { vm, navigate };
     body = {
       summary: <VMSummary {...props} />,
       hardware: <HardwareView {...props} />,
       cloudinit: <CloudInitView {...props} />,
+      options: <OptionsView vm={vm} />,
       console: <Suspense fallback={<Loading />}><ConsoleView vm={vm} /></Suspense>,
-      backups: <BackupsView vm={vm} />,
+      backups: <BackupsView {...props} />,
       offsite: <OffsiteView {...props} />,
     }[route.tab] ?? <VMSummary {...props} />;
   }
@@ -183,7 +205,8 @@ function Content({ route, navigate }: { route: Route; navigate: Navigate }) {
           ? <h2><span className="kind">Host</span>{app.host?.hostname ?? ''}</h2>
           : <>
             <h2><span className="kind">VM</span>{route.name}</h2>
-            {vm && <StateBadge state={vm.state} />}
+            {vm && (vm.template ? <Badge>template</Badge> : <StateBadge state={vm.state} />)}
+            {vm && <Tags tags={vm.tags} />}
             {vm?.activity && <Badge kind="info"><Spinner />{vm.activity}</Badge>}
             {vm?.seedPending && <Badge kind="warn" title="Cloud-init settings changed while running">restart to apply cloud-init</Badge>}
           </>}

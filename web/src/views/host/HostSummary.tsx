@@ -1,7 +1,7 @@
 import type { ReactNode } from 'react';
 import { Badge, KV, Loading, Meter, Panel, StateDot } from '../../components/ui';
 import type { Navigate } from '../../components/Shell';
-import { fmtBytes, fmtMemMB } from '../../format';
+import { fmtBytes, fmtMemMB, fmtPercent } from '../../format';
 import { useApp, type StatsSample } from '../../store';
 import type { HostMemory } from '../../types';
 
@@ -25,6 +25,7 @@ export function HostSummary({ navigate }: { navigate: Navigate }) {
             ['macOS', host.osVersion || '—'],
             ['Tart', host.tartVersion ?? <Badge kind="err">not found</Badge>],
             ['CPUs', String(host.cpus ?? '—')],
+            stats?.cpu != null && ['CPU usage', <div>{fmtPercent(stats.cpu)}<Meter fraction={stats.cpu} /></div>],
             load.length === 3 && ['Load average', <span className="mono">{load.map((l) => l.toFixed(2)).join('  ')}</span>],
             !!host.web?.urls.length && ['Web UI', <ul className="web-urls">
               {host.web.urls.map((u) => (
@@ -68,7 +69,8 @@ export function HostSummary({ navigate }: { navigate: Navigate }) {
             <div className="vm-chips">
               {vms.map((v) => (
                 <button key={v.name} type="button" className="chip" onClick={() => navigate({ type: 'vm', name: v.name, tab: 'summary' })}>
-                  <StateDot state={v.state} />{v.name}<span className="muted">{fmtMemMB(v.memoryMB)}</span>
+                  {v.template ? <span className="dot template" /> : <StateDot state={v.state} />}{v.name}
+                  <span className="muted">{v.template ? 'template' : fmtMemMB(v.memoryMB)}</span>
                 </button>
               ))}
             </div>

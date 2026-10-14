@@ -47,9 +47,9 @@ struct VMRowView: View {
                 Button { Task { await state.stop(item.name) } } label: { Image(systemName: "stop.fill") }
                     .help("Shut down")
             } else {
-                Button { Task { await state.start(item.name) } } label: { Image(systemName: "play.fill") }
-                    .help("Start")
-                    .disabled(item.state == "missing" || item.state == "offline")
+                Button { Task { await state.start(item.name) } } label: { Image(systemName: item.meta.template ? "doc.on.doc" : "play.fill") }
+                    .help(item.meta.template ? "Template: clone it in the web UI or with `cli clone`" : "Start")
+                    .disabled(item.state == "missing" || item.state == "offline" || item.meta.template)
             }
 
             Menu {
@@ -58,7 +58,19 @@ struct VMRowView: View {
                 Button("Copy SSH Command") { state.copySSHCommand(item) }
                     .disabled(item.ip == nil)
                 Divider()
+                Button("Reboot") { Task { await state.reboot(item.name) } }
+                    .disabled(!item.isRunning)
+                Button("Force Stop") { Task { await state.stop(item.name, force: true) } }
+                    .disabled(!item.isRunning)
+                Divider()
                 Button("Back Up Now") { Task { await state.backup(item.name) } }
+                if !state.targets.isEmpty {
+                    Menu("Back Up To") {
+                        ForEach(state.targets) { target in
+                            Button(target.name) { Task { await state.backup(item.name, to: target.id) } }
+                        }
+                    }
+                }
                 Button("Backups…") {
                     openWindow(id: "backups", value: item.name)
                     activateApp()
@@ -68,6 +80,7 @@ struct VMRowView: View {
                     get: { item.meta.autostart },
                     set: { value in Task { await state.setAutostart(item.name, value) } }
                 ))
+                .disabled(item.meta.template)
                 Divider()
                 Button("Delete…", role: .destructive) { confirmDelete() }
             } label: {

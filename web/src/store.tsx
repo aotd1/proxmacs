@@ -2,7 +2,7 @@ import { createContext, useCallback, useContext, useMemo, useRef, useState, type
 import { api, AuthError } from './api';
 import { useToast } from './components/Toasts';
 import { NARROW, useLocalStorage, usePoller } from './hooks';
-import type { Host, HostStats, NetInterface, StorageStatus, Target, Task, VM } from './types';
+import type { BackupJob, Host, HostStats, NetInterface, StorageStatus, Target, Task, VM } from './types';
 
 /** Samples kept for the host memory chart (3 s apart → 6 minutes). */
 const HISTORY = 120;
@@ -12,6 +12,7 @@ export interface StatsSample {
   used: number;
   total: number;
   vms: number;
+  cpu: number | null;
 }
 
 interface AppData {
@@ -23,6 +24,7 @@ interface AppData {
   vms: VM[];
   tasks: Task[];
   targets: Target[];
+  jobs: BackupJob[];
   interfaces: NetInterface[];
   storage: StorageStatus | null;
   /** VM name → number of its tasks that finished since load; views reload their data when it changes. */
@@ -33,6 +35,7 @@ interface AppData {
   target(id: string): Target | null;
   updateVM(vm: VM): void;
   reloadTargets(): Promise<void>;
+  reloadJobs(): Promise<void>;
   reloadStorage(): Promise<void>;
   reloadInterfaces(): Promise<NetInterface[]>;
   /** Starts a backend task (202 {task}); the user is notified when it finishes. */
@@ -58,6 +61,7 @@ export function AppDataProvider({ children }: { children: ReactNode }) {
   const [vms, setVMs] = useState<VM[]>([]);
   const [tasks, setTasks] = useState<Task[]>([]);
   const [targets, setTargets] = useState<Target[]>([]);
+  const [jobs, setJobs] = useState<BackupJob[]>([]);
   const [interfaces, setInterfaces] = useState<NetInterface[]>([]);
   const [storage, setStorage] = useState<StorageStatus | null>(null);
   const [taskEpoch, setTaskEpoch] = useState<Record<string, number>>({});
@@ -68,6 +72,7 @@ export function AppDataProvider({ children }: { children: ReactNode }) {
   const myTasks = useRef(new Map<string, string>());
   const pollRef = useRef<() => void>(() => {});
   const storageRef = useRef<() => void>(() => {});
+  const jobsRef = useRef<() => void>(() => {});
 
   const handleTasks = useCallback((list: Task[]) => {
     const finished: Task[] = [];
@@ -90,7 +95,7 @@ export function AppDataProvider({ children }: { children: ReactNode }) {
         for (const t of finished) if (t.vm) next[t.vm] = (next[t.vm] ?? 0) + 1;
         return next;
       });
-      if (finished.some((t) => !t.vm)) storageRef.current();
+      if (finished.some((t) => !t.vm)) { storageRef.current(); jobsRef.current(); }
       // The VM's state likely changed with the task: refresh again shortly.
       window.setTimeout(() => pollRef.current(), 300);
     }
@@ -114,7 +119,7 @@ export function AppDataProvider({ children }: { children: ReactNode }) {
       const s = await api<HostStats>('GET', '/api/host/stats');
       setStats(s);
       if (s.memory) {
-        const sample = { t: Date.parse(s.time) || Date.now(), used: s.memory.used, total: s.memory.total, vms: s.vmMemoryBytes };
+        const sample = { t: Date.parse(s.time) || Date.now(), used: s.memory.used, total: s.memory.total, vms: s.vmMemoryBytes, cpu: s.cpu };
         setHistory((h) => [...h, sample].slice(-HISTORY));
       }
     } catch { /* keep the last sample */ }
@@ -128,6 +133,14 @@ export function AppDataProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
+  const reloadJobs = useCallback(async () => {
+    try {
+      setJobs(await api<BackupJob[]>('GET', '/api/jobs'));
+    } catch (e) {
+      if (!(e instanceof AuthError)) console.warn('jobs:', e);
+    }
+  }, []);
+
   const reloadStorage = useCallback(async () => {
     try {
       setStorage(await api<StorageStatus>('GET', '/api/host/storage'));
@@ -137,14 +150,16 @@ export function AppDataProvider({ children }: { children: ReactNode }) {
   }, []);
 
   storageRef.current = () => void reloadStorage();
+  jobsRef.current = () => void reloadJobs();
 
   const refreshSlow = useCallback(async () => {
     await Promise.all([
       api<Host>('GET', '/api/host').then(setHost, () => {}),
       reloadTargets(),
       reloadStorage(),
+      reloadJobs(),
     ]);
-  }, [reloadTargets, reloadStorage]);
+  }, [reloadTargets, reloadStorage, reloadJobs]);
 
   const reloadInterfaces = useCallback(async () => {
     try {
@@ -180,12 +195,12 @@ export function AppDataProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const value = useMemo<AppData>(() => ({
-    loaded, online, host, stats, history, vms, tasks, targets, interfaces, storage, taskEpoch, tasksOpen, setTasksOpen,
+    loaded, online, host, stats, history, vms, tasks, targets, jobs, interfaces, storage, taskEpoch, tasksOpen, setTasksOpen,
     vm: (name) => vms.find((v) => v.name === name) ?? null,
     target: (id) => targets.find((t) => String(t.id) === String(id)) ?? null,
-    updateVM, reloadTargets, reloadStorage, reloadInterfaces, startTask, pollNow,
-  }), [loaded, online, host, stats, history, vms, tasks, targets, interfaces, storage, taskEpoch, tasksOpen, setTasksOpen,
-    updateVM, reloadTargets, reloadStorage, reloadInterfaces, startTask, pollNow]);
+    updateVM, reloadTargets, reloadJobs, reloadStorage, reloadInterfaces, startTask, pollNow,
+  }), [loaded, online, host, stats, history, vms, tasks, targets, jobs, interfaces, storage, taskEpoch, tasksOpen, setTasksOpen,
+    updateVM, reloadTargets, reloadJobs, reloadStorage, reloadInterfaces, startTask, pollNow]);
 
   return <AppDataContext.Provider value={value}>{children}</AppDataContext.Provider>;
 }

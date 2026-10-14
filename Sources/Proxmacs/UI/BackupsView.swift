@@ -12,12 +12,12 @@ struct BackupsView: View {
 
     var body: some View {
         Form {
-            Section("Schedule") {
-                Toggle("Daily backup", isOn: $policy.daily)
-                Stepper("At \(policy.hour):00", value: $policy.hour, in: 0...23)
-                    .disabled(!policy.daily)
-                Stepper("Keep last \(policy.keep)", value: $policy.keep, in: 1...50)
-                Text("Backups are instant APFS clones on this Mac's disk. They protect against mistakes inside the VM, not against losing this Mac.")
+            Section("Retention") {
+                Stepper("Keep last \(policy.keep)", value: $policy.keep, in: 0...99)
+                Stepper("Keep daily \(policy.keepDaily)", value: $policy.keepDaily, in: 0...99)
+                Stepper("Keep weekly \(policy.keepWeekly)", value: $policy.keepWeekly, in: 0...99)
+                Stepper("Keep monthly \(policy.keepMonthly)", value: $policy.keepMonthly, in: 0...99)
+                Text("Backups are instant APFS clones on this Mac's disk. They protect against mistakes inside the VM, not against losing this Mac. Schedule them with backup jobs in the web UI (Host → Backup Jobs) or `cli job-add`.")
                     .font(.caption).foregroundStyle(.secondary)
             }
 

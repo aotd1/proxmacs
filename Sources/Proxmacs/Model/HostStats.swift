@@ -57,6 +57,19 @@ enum HostStats {
                           swapUsed: swap.xsu_used, swapTotal: swap.xsu_total, pressure: Int(pressure))
     }
 
+    /// Nested virtualization needs Apple M3 or later (and macOS 15).
+    static let supportsNestedVirtualization: Bool = {
+        guard #available(macOS 15, *) else { return false }
+        var size = 0
+        sysctlbyname("machdep.cpu.brand_string", nil, &size, nil, 0)
+        var buffer = [CChar](repeating: 0, count: max(size, 1))
+        sysctlbyname("machdep.cpu.brand_string", &buffer, &size, nil, 0)
+        let brand = String(cString: buffer)
+        guard let range = brand.range(of: #"Apple M[0-9]+"#, options: .regularExpression),
+              let generation = Int(brand[range].dropFirst("Apple M".count)) else { return false }
+        return generation >= 3
+    }()
+
     static func loadAverage() -> [Double] {
         var loads = [Double](repeating: 0, count: 3)
         return getloadavg(&loads, 3) == 3 ? loads : []

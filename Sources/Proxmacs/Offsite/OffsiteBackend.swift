@@ -13,6 +13,11 @@ typealias ProgressHandler = @Sendable (Double) -> Void
 enum BackupFiles {
     static let disk = "disk.img"
     static let blobs = ["nvram.bin", "config.json", "meta.json"]
+
+    /// Disk images in a backup directory: the root disk, then extra disks (disk1.img, …).
+    static func images(in dir: URL) -> [String] {
+        [disk] + BackupManager.extraDisks(in: dir)
+    }
 }
 
 protocol OffsiteBackend {
@@ -25,6 +30,8 @@ protocol OffsiteBackend {
     func pull(_ snapshot: RemoteSnapshot, into dir: URL, progress: ProgressHandler) async throws
     /// Keeps the newest `keep` snapshots of `vm`.
     func prune(vm: String, keep: Int) async throws
+    /// Reads every chunk of a snapshot back and checks its digest; returns a summary.
+    func verify(_ snapshot: RemoteSnapshot, progress: ProgressHandler) async throws -> String
 }
 
 extension BackupRecord {

@@ -64,6 +64,7 @@ struct HardwareChange {
     var memoryMB: Int?
     var diskGB: Int?
     var network: NetworkMode?
+    var nested: Bool?
 }
 
 enum PasswordChange: Equatable {
@@ -113,11 +114,18 @@ final class AppState {
     /// Lets the CLI echo progress messages.
     var onStatus: ((String) -> Void)?
 
+    let metrics = VMMetrics()
+    /// Share of host CPU in use over the last metrics interval.
+    private(set) var hostCPU: Double?
+    /// Backup jobs currently running.
+    private(set) var runningJobs: Set<String> = []
+
     private var ips: [String: String] = [:]
-    private var lastScheduledBackup: [String: Date] = [:]
+    private var guestCache: [String: (info: GuestInfo, time: Date)] = [:]
 
     init(autoRefresh: Bool = true) {
         Paths.ensure()
+        JobStore.migrate()
         if autoRefresh {
             Task { await loop() }
         }
@@ -126,7 +134,11 @@ final class AppState {
     private func loop() async {
         while true {
             await refresh()
-            await runScheduledBackups()
+            if metrics.due, let tart, vmStorageOnline {
+                hostCPU = HostStats.cpuUsage() ?? hostCPU
+                await metrics.sample(running: vms.filter(\.isRunning), tart: tart)
+            }
+            await runScheduledJobs()
             try? await Task.sleep(for: .seconds(5))
         }
     }
@@ -353,15 +365,35 @@ final class AppState {
         await perform(vm, "Start", taskID: taskID) { _ in
             let tart = try requireTart()
             guard let meta = VMMeta.load(vm) else { throw ProxmacsError("missing metadata") }
+            if meta.template { throw ProxmacsError("\(vm) is a template: clone it to get a VM you can start") }
             try LaunchAgent.write(tart: tart, meta: meta)  // pick up any metadata changes
             try await LaunchAgent.start(vm)
             return nil
         }
     }
 
-    func stop(_ vm: String, taskID: String? = nil) async {
-        await perform(vm, "Shutdown", taskID: taskID) { _ in
-            try await requireTart().stop(vm)
+    /// Shuts the guest down (forced off after 30 s), or with `force` turns it off at once.
+    func stop(_ vm: String, force: Bool = false, taskID: String? = nil) async {
+        await perform(vm, force ? "Stop" : "Shutdown", taskID: taskID) { _ in
+            try await requireTart().stop(vm, timeout: force ? 0 : 30)
+            return nil
+        }
+    }
+
+    /// Reboots through the guest agent, or by stopping and starting the VM (always, with `force`).
+    func reboot(_ vm: String, force: Bool = false, taskID: String? = nil) async {
+        await perform(vm, force ? "Reset" : "Reboot", taskID: taskID) { task in
+            let tart = try requireTart()
+            guard item(vm)?.isRunning == true else { throw ProxmacsError("\(vm) is not running") }
+            if !force, (try? await tart.exec(vm, ["systemctl", "reboot"], timeout: 10))?.succeeded == true {
+                return "Rebooting \(vm)"
+            }
+            task.message(force ? "Turning \(vm) off…" : "Guest agent unreachable: shutting \(vm) down…")
+            try await tart.stop(vm, timeout: force ? 0 : 30)
+            guard let meta = VMMeta.load(vm) else { throw ProxmacsError("missing metadata") }
+            try LaunchAgent.write(tart: tart, meta: meta)
+            task.message("Starting \(vm)…")
+            try await LaunchAgent.start(vm)
             return nil
         }
     }
@@ -378,6 +410,8 @@ final class AppState {
             }
             try FileManager.default.removeItem(at: Paths.vmDir(vm))
             ips[vm] = nil
+            guestCache[vm] = nil
+            metrics.forget(vm)
             return "Deleted \(vm); backups kept"
         }
     }
@@ -390,7 +424,8 @@ final class AppState {
         let cpus = change.cpus.flatMap { $0 == current.cpus ? nil : $0 }
         let memoryMB = change.memoryMB.flatMap { $0 == current.memoryMB ? nil : $0 }
         let diskGB = change.diskGB.flatMap { $0 == current.diskGB ? nil : $0 }
-        guard cpus != nil || memoryMB != nil || diskGB != nil || networkChanged else { return }
+        let nested = change.nested.flatMap { $0 == meta.nested ? nil : $0 }
+        guard cpus != nil || memoryMB != nil || diskGB != nil || networkChanged || nested != nil else { return }
 
         guard current.state == "stopped" else { throw ProxmacsError("Shut down \(vm) before changing its hardware") }
         let hostCPUs = ProcessInfo.processInfo.activeProcessorCount
@@ -410,11 +445,13 @@ final class AppState {
             if networkChanged, let network = change.network {
                 try updateMeta(vm) { $0.network = network }
             }
+            if let nested { try updateMeta(vm) { $0.nested = nested } }
             var changes: [String] = []
             if let cpus { changes.append("\(cpus) CPUs") }
             if let memoryMB { changes.append("\(memoryMB) MB memory") }
             if let diskGB { changes.append("\(diskGB) GB disk (the root filesystem grows on next boot)") }
             if networkChanged, let network = change.network { changes.append(network.label) }
+            if let nested { changes.append("nested virtualization \(nested ? "on" : "off")") }
             return "\(vm): " + changes.joined(separator: ", ")
         }
     }
@@ -442,7 +479,7 @@ final class AppState {
 
         try await performThrowing(vm, "Edit cloud-init", taskID: taskID) { task in
             let agent = try await ImageStore.agentPackages { message, _ in task.message(message) }
-            try await CloudInitSeed.build(name: vm, config: config, agentPackages: agent)
+            try await CloudInitSeed.build(name: vm, config: config, agentPackages: agent, newIdentity: meta.newIdentity)
             let running = item(vm)?.isRunning ?? false
             try updateMeta(vm) {
                 $0.cloudInit = config
@@ -468,21 +505,290 @@ final class AppState {
         do { try updateMeta(vm) { $0.backup = policy } } catch { lastError = error.localizedDescription }
     }
 
+    // MARK: - Clones and templates
+
+    /// Copies a VM (all disks, NVRAM, settings) under a new name, with a new MAC address. A running source is
+    /// cloned like a backup: its root filesystem is frozen for the instant APFS clone. The clone's first boot
+    /// regenerates its SSH host keys and machine-id.
+    func clone(_ source: String, to name: String, start: Bool, network: GuestNetwork? = nil, taskID: String? = nil) async throws {
+        guard let sourceMeta = VMMeta.load(source), FileManager.default.fileExists(atPath: Paths.tartVMDir(source).path) else {
+            throw ProxmacsError("No VM named \(source)")
+        }
+        try validateNewVM(name)
+        var config = sourceMeta.effectiveCloudInit
+        if let network { config.network = network }
+        try config.validate()
+
+        try await performThrowing(name, "Clone \(source)", taskID: taskID) { task in
+            let tart = try requireTart()
+            let running = item(source)?.isRunning ?? false
+            let files = BackupManager.vmFiles + sourceMeta.disks.map(\.file)
+            let agent = try await ImageStore.agentPackages { message, _ in task.message(message) }
+
+            task.message("Creating \(name)…")
+            try await tart.createLinux(name, diskSizeGB: 1)
+            do {
+                let stage = try BackupManager.stagingDir()
+                defer { BackupManager.removeStaging(stage) }
+                task.message(running ? "Cloning the disks of running \(source)…" : "Cloning the disks of \(source)…")
+                let frozen = try await BackupManager.snapshot(source, files: files, into: stage, running: running, tart: tart)
+                let target = Paths.tartVMDir(name)
+                for file in files {
+                    let destination = target.appending(path: file)
+                    try? FileManager.default.removeItem(at: destination)
+                    try FileManager.default.moveItem(at: stage.appending(path: file), to: destination)
+                }
+                try await tart.set(name, randomMAC: true)
+
+                var meta = sourceMeta
+                meta.name = name
+                meta.autostart = false
+                meta.template = false
+                meta.created = Date()
+                meta.seedPending = false
+                meta.newIdentity = true
+                meta.startOrder = nil
+                meta.cloudInit = config
+                try meta.save()
+                task.message("Building cloud-init seed…")
+                try await CloudInitSeed.build(name: name, config: config, agentPackages: agent, newIdentity: true)
+                try LaunchAgent.write(tart: tart, meta: meta)
+                if running, !frozen { task.message("Cloned without freezing \(source): guest agent unreachable") }
+            } catch {
+                try? await tart.delete(name)
+                try? FileManager.default.removeItem(at: Paths.vmDir(name))
+                try? FileManager.default.removeItem(at: LaunchAgent.plistURL(name))
+                throw error
+            }
+            if start {
+                task.message("Starting \(name)…")
+                try await LaunchAgent.start(name)
+            }
+            return "Cloned \(source) to \(name)"
+        }
+    }
+
+    func setTemplate(_ vm: String, _ template: Bool) throws {
+        guard let current = item(vm) else { throw ProxmacsError("No VM named \(vm)") }
+        if template, current.state != "stopped" { throw ProxmacsError("Shut down \(vm) before converting it to a template") }
+        try updateMeta(vm) {
+            $0.template = template
+            if template { $0.autostart = false }
+        }
+        status = template ? "\(vm) is now a template" : "\(vm) is a VM again"
+    }
+
+    // MARK: - Extra disks and shared folders
+
+    private func requireStopped(_ vm: String, _ what: String) throws {
+        guard let current = item(vm) else { throw ProxmacsError("No VM named \(vm)") }
+        guard current.state == "stopped" else { throw ProxmacsError("Shut down \(vm) before \(what)") }
+    }
+
+    /// Size in GB (as Tart counts them) of a disk image.
+    static func diskGB(_ url: URL) -> Int { Int(FileCopy.size(of: url) / 1_000_000_000) }
+
+    func addDisk(_ vm: String, sizeGB: Int) throws -> String {
+        try requireStopped(vm, "adding a disk")
+        _ = try requireTart()
+        guard (1...16_384).contains(sizeGB) else { throw ProxmacsError("Disk size must be between 1 and 16384 GB") }
+        guard let meta = VMMeta.load(vm) else { throw ProxmacsError("No VM named \(vm)") }
+        let dir = Paths.tartVMDir(vm)
+        guard let file = (1...99).map({ "disk\($0).img" }).first(where: { name in
+            !meta.disks.contains { $0.file == name } && !FileManager.default.fileExists(atPath: dir.appending(path: name).path)
+        }) else { throw ProxmacsError("Too many disks") }
+        let url = dir.appending(path: file)
+        // A sparse file: it takes no space until the guest writes to it.
+        guard FileManager.default.createFile(atPath: url.path, contents: nil) else { throw ProxmacsError("Cannot create \(url.path)") }
+        let handle = try FileHandle(forWritingTo: url)
+        defer { try? handle.close() }
+        try handle.truncate(atOffset: UInt64(sizeGB) * 1_000_000_000)
+        try updateMeta(vm) { $0.disks.append(ExtraDisk(file: file)) }
+        status = "Added a \(sizeGB) GB disk to \(vm) (\(file))"
+        return file
+    }
+
+    func resizeDisk(_ vm: String, file: String, sizeGB: Int) throws {
+        try requireStopped(vm, "resizing its disks")
+        _ = try requireTart()
+        guard VMMeta.load(vm)?.disks.contains(where: { $0.file == file }) == true else { throw ProxmacsError("\(vm) has no disk \(file)") }
+        let url = Paths.tartVMDir(vm).appending(path: file)
+        let current = FileCopy.size(of: url)
+        let size = Int64(sizeGB) * 1_000_000_000
+        guard sizeGB <= 16_384 else { throw ProxmacsError("Disk size too large") }
+        guard size >= current else { throw ProxmacsError("Disks can only grow (\(file) has \(Self.diskGB(url)) GB)") }
+        let handle = try FileHandle(forWritingTo: url)
+        defer { try? handle.close() }
+        try handle.truncate(atOffset: UInt64(size))
+    }
+
+    func removeDisk(_ vm: String, file: String) throws {
+        try requireStopped(vm, "removing a disk")
+        _ = try requireTart()
+        guard VMMeta.load(vm)?.disks.contains(where: { $0.file == file }) == true, ExtraDisk.isValidFile(file) else {
+            throw ProxmacsError("\(vm) has no disk \(file)")
+        }
+        try updateMeta(vm) { $0.disks.removeAll { $0.file == file } }
+        try? FileManager.default.removeItem(at: Paths.tartVMDir(vm).appending(path: file))
+        status = "Removed \(file) from \(vm)"
+    }
+
+    func setDiskBackup(_ vm: String, file: String, backup: Bool) throws {
+        guard VMMeta.load(vm)?.disks.contains(where: { $0.file == file }) == true else { throw ProxmacsError("\(vm) has no disk \(file)") }
+        try updateMeta(vm) { meta in
+            if let index = meta.disks.firstIndex(where: { $0.file == file }) { meta.disks[index].backup = backup }
+        }
+    }
+
+    func addShare(_ vm: String, _ share: SharedFolder) async throws {
+        try requireStopped(vm, "changing its shared folders")
+        guard SharedFolder.isValidName(share.name) else {
+            throw ProxmacsError("Share names are letters, digits, dots, dashes and underscores")
+        }
+        let path = URL(fileURLWithPath: (share.path as NSString).expandingTildeInPath).resolvingSymlinksInPath().path
+        var isDir: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: path, isDirectory: &isDir), isDir.boolValue else {
+            throw ProxmacsError("\(share.path) is not a folder on this Mac")
+        }
+        guard !path.contains(":") else { throw ProxmacsError("Folder paths can't contain a colon") }
+        guard let meta = VMMeta.load(vm), !meta.shares.contains(where: { $0.name == share.name }) else {
+            throw ProxmacsError("\(vm) already has a share named \(share.name)")
+        }
+        try updateMeta(vm) { $0.shares.append(SharedFolder(name: share.name, path: path, readOnly: share.readOnly)) }
+        try await ensureShareMount(vm)
+    }
+
+    func removeShare(_ vm: String, name: String) throws {
+        try requireStopped(vm, "changing its shared folders")
+        try updateMeta(vm) { $0.shares.removeAll { $0.name == name } }
+    }
+
+    /// Seeds built before shared folders existed lack the unit that mounts them: rebuild once.
+    private func ensureShareMount(_ vm: String) async throws {
+        let version = (try? String(contentsOf: CloudInitSeed.versionFile(vm), encoding: .utf8)).flatMap { Int($0) } ?? 1
+        guard version < 2, let meta = VMMeta.load(vm), FileManager.default.fileExists(atPath: Paths.seedISO(vm).path) else { return }
+        let agent = try await ImageStore.agentPackages { _, _ in }
+        try await CloudInitSeed.build(name: vm, config: meta.effectiveCloudInit, agentPackages: agent, newIdentity: meta.newIdentity)
+    }
+
+    // MARK: - Guest
+
+    /// Guest OS, interfaces and filesystems from the agent; cached for 30 s.
+    func guestInfo(_ vm: String, refresh: Bool = false) async throws -> GuestInfo {
+        if !refresh, let cached = guestCache[vm], Date().timeIntervalSince(cached.time) < 30 { return cached.info }
+        let tart = try requireTart()
+        guard item(vm)?.isRunning == true else { throw ProxmacsError("\(vm) is not running") }
+        let info = try await GuestInfo.fetch(vm, tart: tart)
+        guestCache[vm] = (info, Date())
+        return info
+    }
+
     // MARK: - Local backups
 
-    func backup(_ vm: String, taskID: String? = nil) async {
+    /// Backs up to local backups, or with `targetID` straight to that offsite target. Returns whether the
+    /// backup succeeded (offsite pushes after a local backup are separate tasks).
+    @discardableResult
+    func backup(_ vm: String, to targetID: String? = nil, taskID: String? = nil) async -> Bool {
+        if let targetID { return await backupOffsite(vm, targetID: targetID, taskID: taskID) }
         let ok = await perform(vm, "Backup", taskID: taskID) { task in
             let tart = try requireTart()
             if storageBusy == .backups { throw ProxmacsError("Backups are being moved; try again when that has finished") }
             let running = item(vm)?.isRunning ?? false
-            let keep = VMMeta.load(vm)?.backup.keep ?? 5
-            let info = try await BackupManager.backup(vm, running: running, tart: tart, keep: keep) { task.progress($0) }
+            let policy = VMMeta.load(vm)?.backup ?? BackupPolicy()
+            let info = try await BackupManager.backup(vm, running: running, tart: tart, policy: policy) { task.progress($0) }
             return info.record.consistent ? "Backup of \(vm) done" : "Backup of \(vm) done (crash-consistent: guest agent unreachable)"
         }
-        guard ok, let meta = VMMeta.load(vm), meta.offsite.auto, let latest = BackupManager.list(vm).first else { return }
+        guard ok, let meta = VMMeta.load(vm), meta.offsite.auto, let latest = BackupManager.list(vm).first else { return ok }
         for target in meta.offsite.targets {
             await push(vm, backup: latest, targetID: target)
         }
+        return ok
+    }
+
+    private func backupOffsite(_ vm: String, targetID: String, taskID: String?) async -> Bool {
+        guard let target = TargetStore.target(targetID) else {
+            lastError = "Unknown backup target \(targetID)"
+            return false
+        }
+        return await perform(vm, "Backup to \(target.name)", taskID: taskID) { task in
+            let tart = try requireTart()
+            let backend = try target.backend()
+            let running = item(vm)?.isRunning ?? false
+            task.message("Backing up \(vm) to \(target.name)…")
+            let record = try await BackupManager.backup(vm, running: running, tart: tart, to: backend) { task.progress($0) }
+            let kind = record.consistent ? "" : " (crash-consistent: guest agent unreachable)"
+            do {
+                try await backend.prune(vm: vm, keep: target.keep)
+            } catch {
+                return "Backed up \(vm) to \(target.name)\(kind); prune failed: \(error.localizedDescription)"
+            }
+            return "Backed up \(vm) to \(target.name)\(kind)"
+        }
+    }
+
+    // MARK: - Backup jobs
+
+    private func runScheduledJobs() async {
+        let now = Date()
+        for job in JobStore.load() where job.isDue(now) && !runningJobs.contains(job.id) {
+            await runJob(job.id)
+        }
+    }
+
+    /// Backs up every VM the job selects, one after another, then notifies as configured.
+    func runJob(_ id: String, taskID: String? = nil) async {
+        guard let job = JobStore.job(id), !runningJobs.contains(id) else { return }
+        runningJobs.insert(id)
+        defer { runningJobs.remove(id) }
+        JobStore.update(id) { $0.lastRun = Date() }
+        var failed: [String] = []
+        var done: [String] = []
+        var skipped: [String] = []
+        await perform(nil, job.title, taskID: taskID) { task in
+            let members = vms.filter { job.selects($0.name) }
+            if members.isEmpty { throw ProxmacsError("The job selects no VMs") }
+            if let target = job.target, TargetStore.target(target) == nil {
+                throw ProxmacsError("The job's backup target no longer exists")
+            }
+            for (index, vm) in members.enumerated() {
+                task.message("Backing up \(vm.name) (\(index + 1) of \(members.count))…")
+                if vm.state == "missing" || vm.state == "offline" {
+                    skipped.append(vm.name)
+                } else if await backup(vm.name, to: job.target) {
+                    done.append(vm.name)
+                } else {
+                    failed.append(vm.name)
+                }
+                task.progress(Double(index + 1) / Double(members.count))
+            }
+            let summary = Self.jobSummary(done: done, failed: failed, skipped: skipped)
+            if !failed.isEmpty { throw ProxmacsError(summary) }
+            return summary
+        }
+        let ok = failed.isEmpty && !done.isEmpty
+        let summary = done.isEmpty && failed.isEmpty && skipped.isEmpty ? "The job selects no VMs" : Self.jobSummary(done: done, failed: failed, skipped: skipped)
+        JobStore.update(id) {
+            $0.lastOK = ok
+            $0.lastMessage = summary
+        }
+        if job.notify == .always || (job.notify == .failure && !ok) {
+            let host = ProcessInfo.processInfo.hostName
+            var lines = [summary]
+            for name in failed {
+                if let error = tasks.first(where: { $0.vm == name && $0.title.hasPrefix("Backup") })?.message { lines.append("\(name): \(error)") }
+            }
+            let errors = await Notifier.broadcast(title: "\(ok ? "✅" : "❌") \(job.title) on \(host)", message: lines.joined(separator: "\n"),
+                                                  failed: !ok)
+            if !errors.isEmpty { lastError = "Notification failed: " + errors.joined(separator: "; ") }
+        }
+    }
+
+    private static func jobSummary(done: [String], failed: [String], skipped: [String]) -> String {
+        var parts: [String] = []
+        if !done.isEmpty { parts.append("backed up \(done.joined(separator: ", "))") }
+        if !failed.isEmpty { parts.append("failed: \(failed.joined(separator: ", "))") }
+        if !skipped.isEmpty { parts.append("skipped (missing or offline): \(skipped.joined(separator: ", "))") }
+        return parts.joined(separator: "; ").prefix(1).uppercased() + parts.joined(separator: "; ").dropFirst()
     }
 
     func restore(_ vm: String, _ backup: BackupInfo, taskID: String? = nil) async {
@@ -496,7 +802,10 @@ final class AppState {
             if item(vm)?.isRunning == true {
                 throw ProxmacsError("Stop the VM before restoring")
             }
-            try await BackupManager.restore(vm, from: backup) { task.progress($0) }
+            let extra = try await BackupManager.restore(vm, from: backup) { task.progress($0) }
+            try updateMeta(vm) { meta in
+                for file in extra where !meta.disks.contains(where: { $0.file == file }) { meta.disks.append(ExtraDisk(file: file)) }
+            }
             return "Restored \(vm) from \(backup.record.date.formatted())"
         }
     }
@@ -520,11 +829,18 @@ final class AppState {
             try FileManager.default.copyItem(at: source, to: tartDir.appending(path: file))
         }
         try await BackupManager.setDisk(vm, from: disk) { task.progress($0) }
+        let extra = BackupManager.extraDisks(in: backup.url)
+        for file in extra {
+            try await BackupManager.setDisk(vm, file: file, from: backup.url.appending(path: file), create: true)
+        }
 
         var meta = (try? JSONDecoder.proxmacs.decode(VMMeta.self, from: Data(contentsOf: backup.url.appending(path: "meta.json"))))
             ?? VMMeta(name: vm, network: .nat, autostart: false)
         meta.name = vm
         meta.autostart = false
+        // Disks not in the backup (excluded from backups) start out detached.
+        meta.disks = meta.disks.filter { extra.contains($0.file) }
+        for file in extra where !meta.disks.contains(where: { $0.file == file }) { meta.disks.append(ExtraDisk(file: file)) }
         try meta.save()
         try LaunchAgent.write(tart: tart, meta: meta)
     }
@@ -533,27 +849,17 @@ final class AppState {
         try BackupManager.delete(backup)
     }
 
-    private func runScheduledBackups() async {
-        let now = Date()
-        let hour = Calendar.current.component(.hour, from: now)
-        for item in vms where item.meta.backup.daily && item.meta.backup.hour == hour && activity[item.name] == nil {
-            let last = lastScheduledBackup[item.name] ?? BackupManager.list(item.name).first?.record.date
-            if let last, Calendar.current.isDate(last, inSameDayAs: now) { continue }
-            lastScheduledBackup[item.name] = now
-            await backup(item.name)
-        }
-    }
-
     // MARK: - Offsite
 
     var targets: [OffsiteTarget] { TargetStore.load() }
 
-    func push(_ vm: String, backup: BackupInfo, targetID: String, taskID: String? = nil) async {
+    @discardableResult
+    func push(_ vm: String, backup: BackupInfo, targetID: String, taskID: String? = nil) async -> Bool {
         guard let target = TargetStore.target(targetID) else {
             lastError = "Unknown offsite target \(targetID)"
-            return
+            return false
         }
-        await perform(vm, "Push to \(target.name)", taskID: taskID) { task in
+        return await perform(vm, "Push to \(target.name)", taskID: taskID) { task in
             try Storage.require(.backups)
             let backend = try target.backend()
             task.message("Uploading \(vm) to \(target.name)…")
@@ -605,11 +911,31 @@ final class AppState {
         }
     }
 
+    /// Reads a remote snapshot back from the target and checks every chunk.
+    func verify(_ vm: String, snapshotID: String, targetID: String, taskID: String? = nil) async {
+        guard let target = TargetStore.target(targetID) else {
+            lastError = "Unknown offsite target \(targetID)"
+            return
+        }
+        await perform(vm, "Verify on \(target.name)", taskID: taskID) { task in
+            let backend = try target.backend()
+            guard let snapshot = try await backend.snapshots(vm: vm).first(where: { $0.id == snapshotID }) else {
+                throw ProxmacsError("Snapshot \(snapshotID) of \(vm) not found on \(target.name)")
+            }
+            task.message("Reading \(vm) snapshot back from \(target.name)…")
+            let summary = try await backend.verify(snapshot) { task.progress($0) }
+            return "\(vm) snapshot of \(snapshot.time.formatted()) on \(target.name): \(summary)"
+        }
+    }
+
     func addTarget(_ target: OffsiteTarget, secret: String?) throws {
         try TargetStore.add(target, secret: secret)
     }
 
     func removeTarget(_ id: String) throws {
+        if let job = JobStore.load().first(where: { $0.target == id }) {
+            throw ProxmacsError("Backup job “\(job.title)” backs up to this target: change or delete it first")
+        }
         try TargetStore.remove(id)
         for vm in VMMeta.allNames() {
             try? updateMeta(vm) { $0.offsite.targets.removeAll { $0 == id } }

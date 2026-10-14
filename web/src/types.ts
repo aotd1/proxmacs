@@ -24,10 +24,66 @@ export interface CloudInit {
   network: GuestIPv4;
 }
 
+/** Local backup retention (0 = option off; all 0 keeps everything). */
 export interface BackupPolicy {
-  daily: boolean;
-  hour: number;
   keep: number;
+  keepDaily: number;
+  keepWeekly: number;
+  keepMonthly: number;
+  keepYearly: number;
+}
+
+export interface ExtraDisk {
+  /** diskN.img in the VM's Tart directory. */
+  file: string;
+  sizeGB: number;
+  usedBytes: number;
+  backup: boolean;
+}
+
+export interface SharedFolder {
+  name: string;
+  path: string;
+  readOnly: boolean;
+}
+
+/** One sample of a VM's resource use; rates are bytes per second. */
+export interface VMSample {
+  /** Milliseconds since the epoch. */
+  t: number;
+  /** Share of the VM's vCPUs in use, 0–1. */
+  cpu: number;
+  /** Host memory of the VM process. */
+  memory: number;
+  guestUsed: number | null;
+  guestTotal: number | null;
+  diskRead: number;
+  diskWrite: number;
+  netIn: number | null;
+  netOut: number | null;
+}
+
+export interface VMStats extends Partial<VMSample> {
+  /** Seconds since the VM process started. */
+  uptime?: number;
+}
+
+export type MetricsRange = 'hour' | 'day' | 'week';
+
+export interface Metrics {
+  range: MetricsRange;
+  step: number;
+  samples: VMSample[];
+}
+
+export interface GuestInfo {
+  os: string | null;
+  kernel: string | null;
+  hostname: string | null;
+  uptime: number | null;
+  updated: string;
+  interfaces: { name: string; mac: string | null; addresses: string[] }[];
+  filesystems: { device: string; type: string; mount: string; sizeBytes: number; usedBytes: number }[];
 }
 
 export interface OffsitePolicy {
@@ -52,6 +108,19 @@ export interface VM {
   hasSeed: boolean;
   /** Image the VM was created from; null for VMs created by older versions. */
   image: string | null;
+  /** Templates can't be started, only cloned. */
+  template: boolean;
+  tags: string[];
+  notes: string;
+  /** Start-on-login order (lower first); null = after the ordered VMs. */
+  startOrder: number | null;
+  /** Seconds to wait after starting this VM at login. */
+  startDelay: number;
+  nested: boolean;
+  disks: ExtraDisk[];
+  shares: SharedFolder[];
+  /** Latest resource sample while running. */
+  stats: VMStats | null;
 }
 
 export interface Task {
@@ -73,6 +142,8 @@ export interface Host {
   osVersion: string;
   diskFreeBytes: number;
   diskTotalBytes: number;
+  /** Apple M3 or later on macOS 15+. */
+  nestedVirtualization?: boolean;
   web?: { bind: string; port: number; urls: WebURL[] };
 }
 
@@ -129,6 +200,8 @@ export interface HostMemory {
 
 export interface HostStats {
   time: string;
+  /** Share of host CPU in use, 0–1. */
+  cpu: number | null;
   loadAverage: number[];
   runningVMs: number;
   vmMemoryBytes: number;
@@ -188,4 +261,40 @@ export interface Snapshot {
   vm: string;
   time: string;
   id: string;
+}
+
+export type NotifyWhen = 'never' | 'failure' | 'always';
+
+export interface BackupJob {
+  id: string;
+  enabled: boolean;
+  comment: string;
+  title: string;
+  /** ISO weekdays, 1 = Monday; empty = every day. */
+  days: number[];
+  hour: number;
+  minute: number;
+  selection: 'all' | 'include' | 'exclude';
+  vms: string[];
+  notify: NotifyWhen;
+  /** Offsite target backed up to directly; null = local backups. */
+  target: string | null;
+  targetName: string | null;
+  schedule: string;
+  running: boolean;
+  nextRun: string | null;
+  lastRun: string | null;
+  lastOK: boolean | null;
+  lastMessage: string | null;
+}
+
+/** A webhook notifications are posted to; its URL is a secret and never sent back. */
+export interface NotificationTarget {
+  id: string;
+  name: string;
+  enabled: boolean;
+  format: 'json' | 'discord' | 'slack' | 'ntfy';
+  /** Host of the webhook URL. */
+  host: string | null;
+  location: string;
 }
