@@ -56,10 +56,12 @@ A Proxmox-flavoured menubar VM manager for Apple Silicon Macs, built on [Tart](h
 
 | | |
 | --- | --- |
-| ![VM summary](docs/vm-summary.png) VM summary | ![Serial console](docs/vm-console.png) Serial console in the browser |
+| ![VM summary](docs/vm-summary.png) VM summary: usage, guest agent info, notes and performance graphs | ![Serial console](docs/vm-console.png) Serial console in the browser |
 | ![Create VM](docs/create-vm.png) Create VM | ![Cloud-init](docs/vm-cloudinit.png) Cloud-init settings |
-| ![Hardware](docs/vm-hardware.png) Hardware | ![Backups](docs/vm-backups.png) Local backups and schedule |
-| ![Storage](docs/host-storage.png) VM disks and backups on an external drive | ![Backup targets](docs/host-targets.png) Offsite targets (SMB, Proxmox Backup Server) |
+| ![Hardware](docs/vm-hardware.png) Hardware, extra disks and shared folders | ![Options](docs/vm-options.png) Start on login, start order and tags |
+| ![Backups](docs/vm-backups.png) Local backups and retention | ![Backup jobs](docs/host-jobs.png) Scheduled backup jobs |
+| ![Backup targets](docs/host-targets.png) Offsite targets (SMB, Proxmox Backup Server) | ![Notifications](docs/host-notifications.png) Notification webhooks (Discord, Slack, ntfy, JSON) |
+| ![Storage](docs/host-storage.png) VM disks and backups on an external drive | ![Images](docs/host-images.png) Cloud image catalog |
 | ![Dark mode](docs/vm-summary-dark.png) Dark mode | <img src="docs/mobile-vm-summary.png" alt="Phone" width="180"> <img src="docs/mobile-menu.png" alt="Phone menu" width="180"><br>On a phone |
 
 Regenerate them with `scripts/docs-screenshots.swift` (see the comment at its top).

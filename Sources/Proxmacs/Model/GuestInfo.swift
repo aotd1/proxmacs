@@ -31,7 +31,7 @@ struct GuestInfo: Sendable {
         echo @hostname; hostname
         echo @uptime; cat /proc/uptime
         echo @ip; ip -j addr 2>/dev/null
-        echo @df; df -PT -B1 -x tmpfs -x devtmpfs -x overlay -x squashfs -x efivarfs 2>/dev/null
+        echo @df; df -PT -B1 -x tmpfs -x devtmpfs -x overlay -x squashfs -x efivarfs -x virtiofs 2>/dev/null
         """
 
     static func fetch(_ vm: String, tart: Tart) async throws -> GuestInfo {

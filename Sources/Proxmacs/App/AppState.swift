@@ -128,18 +128,25 @@ final class AppState {
         JobStore.migrate()
         if autoRefresh {
             Task { await loop() }
+            Task { await sampleLoop() }
         }
     }
 
     private func loop() async {
         while true {
             await refresh()
-            if metrics.due, let tart, vmStorageOnline {
-                hostCPU = HostStats.cpuUsage() ?? hostCPU
-                await metrics.sample(running: vms.filter(\.isRunning), tart: tart)
-            }
             await runScheduledJobs()
             try? await Task.sleep(for: .seconds(5))
+        }
+    }
+
+    /// Separate from `loop`, whose rounds take as long as Tart does.
+    private func sampleLoop() async {
+        while true {
+            try? await Task.sleep(for: VMMetrics.untilNextSample)
+            guard let tart, vmStorageOnline else { continue }
+            hostCPU = HostStats.cpuUsage() ?? hostCPU
+            await metrics.sample(running: vms.filter(\.isRunning), tart: tart)
         }
     }
 

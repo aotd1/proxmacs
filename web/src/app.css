@@ -149,7 +149,7 @@ select.small { height: 24px; font-size: 12px; padding: 0 4px; }
 fieldset { border: none; padding: 0; margin: 0; min-width: 0; }
 
 .segmented { display: inline-flex; border: 1px solid var(--border-strong); border-radius: var(--radius); overflow: hidden; }
-.segmented label { padding: 4px 14px; cursor: pointer; user-select: none; }
+.segmented label { position: relative; padding: 4px 14px; cursor: pointer; user-select: none; }
 .segmented label + label { border-left: 1px solid var(--border-strong); }
 .segmented input { position: absolute; opacity: 0; pointer-events: none; }
 .segmented label.disabled { opacity: .5; cursor: not-allowed; }
@@ -550,7 +550,8 @@ input.narrow { width: 90px; }
 /* tags */
 .tags { display: inline-flex; flex-wrap: wrap; gap: 4px; }
 .tag { padding: 0 7px; border-radius: 9px; font-size: 11.5px; line-height: 18px; background: var(--info-bg); color: var(--accent); white-space: nowrap; }
-.tree-item .tags { flex: none; max-width: 45%; overflow: hidden; flex-wrap: nowrap; }
+.tree-tags { display: flex; flex: 0 1 auto; min-width: 0; max-width: 45%; overflow: hidden; }
+.tree-tags .tags { flex-wrap: nowrap; }
 .tree-filter { padding: 0 10px 8px; }
 .tree-filter input { width: 100%; }
 .dot.template { background: none; border: 2px solid var(--muted); border-radius: 2px; }

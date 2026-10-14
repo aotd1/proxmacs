@@ -24,8 +24,9 @@ struct Shot {
 
 let shots = [
     Shot(file: "host-summary", hash: "#/host/summary", size: CGSize(width: 1440, height: 1080), wait: 60, tasks: true),
-    Shot(file: "vm-summary", hash: "#/vm/web01/summary"),
-    Shot(file: "vm-hardware", hash: "#/vm/ci-runner/hardware"),
+    Shot(file: "vm-summary", hash: "#/vm/db01/summary", size: CGSize(width: 1440, height: 1400)),
+    Shot(file: "vm-hardware", hash: "#/vm/db01/hardware", size: CGSize(width: 1440, height: 1100)),
+    Shot(file: "vm-options", hash: "#/vm/web01/options"),
     Shot(file: "vm-cloudinit", hash: "#/vm/web01/cloudinit"),
     Shot(file: "vm-console", hash: "#/vm/web01/console", script: """
         const input = document.querySelector('.xterm-helper-textarea');
@@ -35,10 +36,13 @@ let shots = [
     Shot(file: "vm-backups", hash: "#/vm/web01/backups"),
     Shot(file: "host-storage", hash: "#/host/storage"),
     Shot(file: "host-targets", hash: "#/host/targets"),
+    Shot(file: "host-jobs", hash: "#/host/jobs"),
+    Shot(file: "host-notifications", hash: "#/host/notifications"),
+    Shot(file: "host-images", hash: "#/host/images"),
     Shot(file: "create-vm", hash: "#/host/summary", script: """
         [...document.querySelectorAll('.topbar .btn.primary')].find((b) => b.offsetParent)?.click();
         """),
-    Shot(file: "vm-summary-dark", hash: "#/vm/db01/summary", dark: true),
+    Shot(file: "vm-summary-dark", hash: "#/vm/web01/summary", dark: true),
     Shot(file: "mobile-vm-summary", hash: "#/vm/web01/summary", size: CGSize(width: 390, height: 844)),
     Shot(file: "mobile-menu", hash: "#/vm/web01/summary", size: CGSize(width: 390, height: 844), script: """
         document.querySelector('.nav-toggle')?.click();

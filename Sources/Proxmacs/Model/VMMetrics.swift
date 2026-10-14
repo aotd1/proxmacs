@@ -52,12 +52,15 @@ final class VMMetrics {
     private var agentBackoff: [String: Date] = [:]
     private(set) var latest: [String: VMSample] = [:]
     private(set) var started: [String: Date] = [:]
-    private var lastSample = Date.distantPast
 
-    var due: Bool { Date().timeIntervalSince(lastSample) >= 9.5 }
+    /// Time until just after the next hour-chart bucket starts. Sampling then puts one sample in every
+    /// bucket; a fixed interval drifts by the time each round takes and leaves gaps in the chart.
+    static var untilNextSample: Duration {
+        let step = MetricsRange.hour.step
+        return .milliseconds(Int((step - Date().timeIntervalSince1970.truncatingRemainder(dividingBy: step) + 0.5) * 1000))
+    }
 
     func sample(running: [VMItem], tart: Tart) async {
-        lastSample = Date()
         let names = Set(running.map(\.name))
         for gone in Set(previous.keys).subtracting(names) {
             previous[gone] = nil

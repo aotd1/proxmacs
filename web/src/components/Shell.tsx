@@ -154,7 +154,7 @@ function Tree({ route, navigate, open, onLogout }: { route: Route; navigate: Nav
                     onClick={() => navigate({ type: 'vm', name: vm.name, tab: route.type === 'vm' ? route.tab : 'summary' })}>
                     {vm.template ? <span className="dot template" /> : <StateDot state={vm.state} />}
                     <span className="label">{vm.name}</span>
-                    <span className="wide-only"><Tags tags={vm.tags.slice(0, 2)} /></span>
+                    {!!vm.tags.length && <span className="tree-tags wide-only"><Tags tags={vm.tags.slice(0, 2)} /></span>}
                     {vm.activity && <Spinner title={vm.activity} />}
                   </button>
                 </li>
