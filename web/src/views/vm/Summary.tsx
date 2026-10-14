@@ -33,6 +33,32 @@ export function VMSummary({ vm, navigate }: { vm: VM; navigate: Navigate }) {
     if (updated) app.updateVM(updated);
   };
 
+  if (vm.external) return (
+    <>
+    <div className="toolbar">
+      <ActionButton disabled={!!vm.activity || !canStart} onClick={() => vmStart(app.startTask, vm)}>Start</ActionButton>
+      <ActionButton disabled={!!vm.activity || !running} onClick={() => vmStop(app.startTask, vm)}>Shutdown</ActionButton>
+      <ActionButton disabled={!!vm.activity || !running} onClick={() => vmReboot(app.startTask, vm)}>Reboot</ActionButton>
+      <BackupButton vm={vm} />
+      <MenuButton label="More" items={[
+        {label: 'Stop (turn off now)', disabled: !running, onClick: () => vmPowerOff(app.startTask, confirm, vm)},
+        {label: 'Reset', disabled: !running, onClick: () => vmReset(app.startTask, confirm, vm)},
+      ]} />
+    </div>
+    <div className="grid2">
+      <Panel title="Status"><KV rows={[
+        ['State', <StateBadge state={vm.state} />],
+        ['IP address', <IPCell vm={vm} />],
+        ['Network', networkLabel(vm.network, app.interfaces)],
+        ['Details', vm.notes],
+      ]} /></Panel>
+      <Panel title="Hardware"><KV rows={[
+        ['CPUs', String(vm.cpus ?? '—')], ['Memory', fmtMemMB(vm.memoryMB)],
+        ['Disk', `${vm.diskGB ?? '—'} GB`], ['OS', vm.image ?? 'macOS'],
+      ]} /></Panel>
+    </div>
+    </>
+  );
   return (
     <>
       <div className="toolbar">

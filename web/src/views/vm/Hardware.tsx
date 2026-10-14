@@ -76,16 +76,16 @@ export function HardwareView({ vm, navigate }: { vm: VM; navigate: Navigate }) {
                 </select>
               </Field>
               <MemoryField value={f.memoryMB} onChange={(memoryMB) => set({ memoryMB })} hostBytes={app.host?.memoryBytes} />
-              <Field label="Disk (GB)" hint="Disks can only grow. The root filesystem expands on the next boot.">
+              <Field label="Disk (GB)" hint={vm.macOS ? "Disks can only grow. Expand the APFS container inside macOS afterwards." : "Disks can only grow. The root filesystem expands on the next boot."}>
                 <input type="number" required min={vm.diskGB ?? 1} max={16384} step={1} value={f.diskGB} onChange={(e) => set({ diskGB: e.target.value })} />
               </Field>
               <div className="field">
                 <span>Network</span>
-                <Segmented name="mode" value={f.mode} onChange={(mode) => set({ mode })}
-                  options={[['bridged', 'Bridged', !app.interfaces.length], ['nat', 'NAT']]} />
+                {vm.external ? <span>{vm.network.mode} — {vm.network.interface} (managed network)</span> : <Segmented name="mode" value={f.mode} onChange={(mode) => set({ mode })}
+                  options={[['bridged', 'Bridged', !app.interfaces.length], ['nat', 'NAT']]} />}
                 <span className="hint">The MAC address stays the same.</span>
               </div>
-              {f.mode === 'bridged' && (
+              {!vm.external && f.mode === 'bridged' && (
                 <Field label="Interface">
                   <select value={f.iface} onChange={(e) => set({ iface: e.target.value })}>
                     {app.interfaces.map((i) => <option key={i.device} value={i.device}>{i.name} ({i.device}){i.default ? ' — default' : ''}</option>)}
@@ -118,8 +118,8 @@ export function HardwareView({ vm, navigate }: { vm: VM; navigate: Navigate }) {
           </fieldset>
         </form>
       </Panel>
-      <DisksPanel vm={vm} />
-      <SharesPanel vm={vm} />
+      {!vm.external && <DisksPanel vm={vm} />}
+      {!vm.external && <SharesPanel vm={vm} />}
     </>
   );
 }

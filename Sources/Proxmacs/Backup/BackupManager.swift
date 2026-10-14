@@ -7,6 +7,8 @@ struct BackupRecord: Codable, Hashable {
     var vmWasRunning: Bool
     /// Offsite target name when the backup was pulled from a remote snapshot.
     var source: String? = nil
+    /// Virtual capacity, not the ASIF file length. Used when restoring system-managed macOS VMs.
+    var diskGB: Int? = nil
 }
 
 struct BackupInfo: Identifiable, Hashable {
@@ -75,6 +77,7 @@ enum BackupManager {
     }
 
     static func backup(_ vm: String, running: Bool, tart: Tart, policy: BackupPolicy,
+                       originallyRunning: Bool? = nil,
                        progress: (@Sendable (Double) -> Void)? = nil) async throws -> BackupInfo {
         try Storage.require(.backups)
         try Storage.require(.vms)
@@ -116,7 +119,8 @@ enum BackupManager {
         if FileManager.default.fileExists(atPath: Paths.metaFile(vm).path) {
             try? clone(Paths.metaFile(vm), to: target.appending(path: "meta.json"))
         }
-        let record = BackupRecord(date: date, consistent: !running || frozen, vmWasRunning: running)
+        let record = BackupRecord(date: date, consistent: !running || frozen, vmWasRunning: originallyRunning ?? running,
+                                  diskGB: ExternalMonitor.machines[vm]?.diskGB)
         try JSONEncoder.proxmacs.encode(record).write(to: target.appending(path: recordFile))
 
         prune(vm, policy: policy)

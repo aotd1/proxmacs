@@ -44,7 +44,7 @@ enum LaunchAgent {
     static func write(tart: Tart, meta: VMMeta) throws {
         var env = [
             "HOME": Paths.home.path,
-            "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
+            "PATH": ProcessInfo.processInfo.environment["PATH"] ?? "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
             "NSUnbufferedIO": "YES",
         ]
         for key in ["TART_HOME", "PROXMACS_SUPPORT_DIR"] {

@@ -99,6 +99,9 @@ struct AuthMiddleware<Context: RequestContext>: RouterMiddleware {
             guard APIKeyStore.shared.authenticate(token) != nil else {
                 return API.error("Invalid API key (expected Authorization: Bearer pmx_…)", status: .unauthorized)
             }
+            guard MacControl.allows(method: request.method.rawValue, path: path) else {
+                return API.error("This operation has no macOS system-service adapter yet", status: .notImplemented)
+            }
             return try await next(request, context)
         }
         guard await SessionStore.shared.isValid(request.cookies[SessionStore.cookieName]?.value) else {
@@ -108,6 +111,9 @@ struct AuthMiddleware<Context: RequestContext>: RouterMiddleware {
         if request.method != .get, request.method != .head,
            request.headers[.contentType]?.hasPrefix("application/json") != true {
             return API.error("Mutating requests must use Content-Type: application/json", status: .badRequest)
+        }
+        guard MacControl.allows(method: request.method.rawValue, path: path) else {
+            return API.error("This operation has no macOS system-service adapter yet", status: .notImplemented)
         }
         return try await next(request, context)
     }

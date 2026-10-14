@@ -146,7 +146,7 @@ final class AppState {
             try? await Task.sleep(for: VMMetrics.untilNextSample)
             guard let tart, vmStorageOnline else { continue }
             hostCPU = HostStats.cpuUsage() ?? hostCPU
-            await metrics.sample(running: vms.filter(\.isRunning), tart: tart)
+            await metrics.sample(running: vms.filter { $0.isRunning && !MacControl.isMac($0.name) }, tart: tart)
         }
     }
 
@@ -169,7 +169,14 @@ final class AppState {
             return item
         }
 
-        for item in vms where item.isRunning {
+        for (name, external) in ExternalMonitor.machines {
+            guard let index = vms.firstIndex(where: { $0.name == name }) else { continue }
+            vms[index].state = await ExternalMonitor.state(external)
+            vms[index].ip = external.ip
+            vms[index].diskGB = external.diskGB
+        }
+
+        for item in vms where item.isRunning && !MacControl.external(item.name) {
             let ip = await resolveIP(item, tart: tart)
             ips[item.name] = ip
             if let index = vms.firstIndex(where: { $0.name == item.name }) { vms[index].ip = ip }
@@ -211,6 +218,7 @@ final class AppState {
 
     /// Like `perform`, but rethrows the task's error to the caller.
     func performThrowing(_ vm: String?, _ title: String, taskID: String? = nil, _ work: (TaskHandle) async throws -> String?) async throws {
+        if let vm, let busy = activity[vm] { throw ProxmacsError("VM is busy: \(busy)") }
         var failure: Error?
         await perform(vm, title, taskID: taskID) { task in
             do {
@@ -227,6 +235,10 @@ final class AppState {
     @discardableResult
     func perform(_ vm: String?, _ title: String, taskID: String? = nil, _ work: (TaskHandle) async throws -> String?) async -> Bool {
         let id = taskID ?? UUID().uuidString.lowercased()
+        if let vm, let busy = activity[vm] {
+            tasks.insert(TaskRecord(id: id, vm: vm, title: title, status: .error, message: "VM is busy: \(busy)", finished: Date()), at: 0)
+            return false
+        }
         tasks.insert(TaskRecord(id: id, vm: vm, title: title), at: 0)
         if tasks.count > 200 { tasks.removeLast(tasks.count - 200) }
         if let vm { activity[vm] = title }
@@ -370,6 +382,7 @@ final class AppState {
 
     func start(_ vm: String, taskID: String? = nil) async {
         await perform(vm, "Start", taskID: taskID) { _ in
+            if MacControl.external(vm) { try await MacControl.power(vm, "start"); return "Started \(vm)" }
             let tart = try requireTart()
             guard let meta = VMMeta.load(vm) else { throw ProxmacsError("missing metadata") }
             if meta.template { throw ProxmacsError("\(vm) is a template: clone it to get a VM you can start") }
@@ -382,6 +395,13 @@ final class AppState {
     /// Shuts the guest down (forced off after 30 s), or with `force` turns it off at once.
     func stop(_ vm: String, force: Bool = false, taskID: String? = nil) async {
         await perform(vm, force ? "Stop" : "Shutdown", taskID: taskID) { _ in
+            if MacControl.external(vm) {
+                if force {
+                    try Data().write(to: Paths.tartVMDir(vm).appending(path: ".paused"))
+                    _ = try await MacControl.ownerTart(vm, ["stop", "0"])
+                } else { try await MacControl.power(vm, "stop") }
+                return "Stopped \(vm)"
+            }
             try await requireTart().stop(vm, timeout: force ? 0 : 30)
             return nil
         }
@@ -390,6 +410,14 @@ final class AppState {
     /// Reboots through the guest agent, or by stopping and starting the VM (always, with `force`).
     func reboot(_ vm: String, force: Bool = false, taskID: String? = nil) async {
         await perform(vm, force ? "Reset" : "Reboot", taskID: taskID) { task in
+            if MacControl.external(vm) {
+                if force {
+                    try Data().write(to: Paths.tartVMDir(vm).appending(path: ".paused"))
+                    _ = try await MacControl.ownerTart(vm, ["stop", "0"])
+                    try await MacControl.power(vm, "start")
+                } else { try await MacControl.power(vm, "restart") }
+                return "Restarted \(vm)"
+            }
             let tart = try requireTart()
             guard item(vm)?.isRunning == true else { throw ProxmacsError("\(vm) is not running") }
             if !force, (try? await tart.exec(vm, ["systemctl", "reboot"], timeout: 10))?.succeeded == true {
@@ -407,6 +435,7 @@ final class AppState {
 
     func delete(_ vm: String, taskID: String? = nil) async {
         await perform(vm, "Delete", taskID: taskID) { _ in
+            guard !MacControl.external(vm) else { throw ProxmacsError("Remove the system service before deleting this VM") }
             let tart = try requireTart()
             if item(vm)?.isRunning == true {
                 try? await tart.stop(vm, timeout: 10)
@@ -445,6 +474,20 @@ final class AppState {
         if let diskGB, diskGB > 16_384 { throw ProxmacsError("Disk size too large") }
 
         try await performThrowing(vm, "Edit hardware", taskID: taskID) { _ in
+            if MacControl.external(vm) {
+                try await MacControl.requireStopped(vm)
+                if networkChanged { throw ProxmacsError("This VM uses a managed network; change its VLAN through the homelab network configuration") }
+                if nested == true { throw ProxmacsError("Nested virtualization requires an M3 or newer Mac") }
+                let targetCPU = cpus ?? current.cpus ?? 2
+                let targetMemory = memoryMB ?? current.memoryMB ?? 8192
+                guard targetCPU >= 2, targetMemory >= 4096 else { throw ProxmacsError("macOS needs at least 2 CPUs and 4096 MB RAM") }
+                let otherMemory = vms.filter { $0.name != vm }.reduce(0) { $0 + ($1.memoryMB ?? 0) }
+                let reserve = max(0, try MacControl.settings().reservedMemoryMB ?? 16384)
+                guard targetMemory + otherMemory <= hostMB - reserve else { throw ProxmacsError("Keep \(reserve) MB available for the host; reduce another VM first") }
+                _ = try await MacControl.ownerTart(vm, ["set", String(targetCPU), String(targetMemory), String(diskGB ?? current.diskGB ?? 200)])
+                if let diskGB { try MacControl.updateDiskSize(vm, diskGB) }
+                return "Hardware updated"
+            }
             let tart = try requireTart()
             if cpus != nil || memoryMB != nil || diskGB != nil {
                 try await tart.set(vm, cpu: cpus, memoryMB: memoryMB, diskSizeGB: diskGB)
@@ -466,6 +509,7 @@ final class AppState {
     /// Stores new cloud-init settings and rebuilds the seed; cloud-init applies them on the next start.
     func editCloudInit(_ vm: String, user: String, password: PasswordChange, sshKeys: [String], network: GuestNetwork,
                        taskID: String? = nil) async throws {
+        guard !MacControl.isMac(vm) else { throw ProxmacsError("Cloud-init is available for Linux guests only") }
         guard let meta = VMMeta.load(vm) else { throw ProxmacsError("No VM named \(vm)") }
         var config = meta.effectiveCloudInit
         config.user = user
@@ -498,9 +542,13 @@ final class AppState {
 
     func updateMeta(_ vm: String, _ change: (inout VMMeta) -> Void) throws {
         guard var meta = VMMeta.load(vm) else { throw ProxmacsError("No VM named \(vm)") }
+        let original = meta
         change(&meta)
+        if MacControl.external(vm), meta.network != original.network || meta.autostart != original.autostart || meta.template != original.template || meta.disks != original.disks || meta.shares != original.shares || meta.nested != original.nested || meta.startOrder != original.startOrder || meta.startDelay != original.startDelay {
+            throw ProxmacsError("These settings belong to the system service; tags, notes and backup policies can be changed here")
+        }
         try meta.save()
-        if let tart { try LaunchAgent.write(tart: tart, meta: meta) }
+        if let tart, !MacControl.external(vm) { try LaunchAgent.write(tart: tart, meta: meta) }
         if let index = vms.firstIndex(where: { $0.name == vm }) { vms[index].meta = meta }
     }
 
@@ -521,6 +569,7 @@ final class AppState {
         guard let sourceMeta = VMMeta.load(source), FileManager.default.fileExists(atPath: Paths.tartVMDir(source).path) else {
             throw ProxmacsError("No VM named \(source)")
         }
+        guard !MacControl.isMac(source) else { throw ProxmacsError("macOS cloning needs an offline macOS clone adapter") }
         try validateNewVM(name)
         var config = sourceMeta.effectiveCloudInit
         if let network { config.network = network }
@@ -588,6 +637,7 @@ final class AppState {
     // MARK: - Extra disks and shared folders
 
     private func requireStopped(_ vm: String, _ what: String) throws {
+        guard !MacControl.external(vm) else { throw ProxmacsError("Additional disks and host folder shares need a system-service adapter") }
         guard let current = item(vm) else { throw ProxmacsError("No VM named \(vm)") }
         guard current.state == "stopped" else { throw ProxmacsError("Shut down \(vm) before \(what)") }
     }
@@ -696,14 +746,29 @@ final class AppState {
     /// backup succeeded (offsite pushes after a local backup are separate tasks).
     @discardableResult
     func backup(_ vm: String, to targetID: String? = nil, taskID: String? = nil) async -> Bool {
-        if let targetID { return await backupOffsite(vm, targetID: targetID, taskID: taskID) }
+        if let targetID, !MacControl.external(vm) { return await backupOffsite(vm, targetID: targetID, taskID: taskID) }
         let ok = await perform(vm, "Backup", taskID: taskID) { task in
             let tart = try requireTart()
             if storageBusy == .backups { throw ProxmacsError("Backups are being moved; try again when that has finished") }
             let running = item(vm)?.isRunning ?? false
             let policy = VMMeta.load(vm)?.backup ?? BackupPolicy()
-            let info = try await BackupManager.backup(vm, running: running, tart: tart, policy: policy) { task.progress($0) }
+            let info: BackupInfo
+            if MacControl.external(vm) {
+                task.message("Shutting down macOS for a consistent disk snapshot; it will restart afterwards…")
+                info = try await MacControl.whileStopped(vm) {
+                    try await BackupManager.backup(vm, running: false, tart: tart, policy: policy, originallyRunning: running) { task.progress($0) }
+                }
+            } else {
+                info = try await BackupManager.backup(vm, running: running, tart: tart, policy: policy) { task.progress($0) }
+            }
             return info.record.consistent ? "Backup of \(vm) done" : "Backup of \(vm) done (crash-consistent: guest agent unreachable)"
+        }
+        if ok, let targetID, let latest = BackupManager.list(vm).first {
+            return await perform(vm, "Push backup", taskID: nil) { task in
+                guard let target = TargetStore.target(targetID) else { throw ProxmacsError("Backup target no longer exists") }
+                try await target.backend().push(vm: vm, backupDir: latest.url, record: latest.record) { task.progress($0) }
+                return "Backup uploaded"
+            }
         }
         guard ok, let meta = VMMeta.load(vm), meta.offsite.auto, let latest = BackupManager.list(vm).first else { return ok }
         for target in meta.offsite.targets {
@@ -803,13 +868,26 @@ final class AppState {
             let tart = try requireTart()
             try Storage.require(.backups)
             if VMMeta.load(vm) == nil || !FileManager.default.fileExists(atPath: Paths.tartVMDir(vm).path) {
+                guard !MacControl.external(vm) else {
+                    throw ProxmacsError("The system VM is missing; restore its service and owner before restoring disks")
+                }
                 try await recreate(vm, from: backup, tart: tart, task: task)
                 return "Recreated \(vm) from backup of \(backup.record.date.formatted())"
             }
             if item(vm)?.isRunning == true {
                 throw ProxmacsError("Stop the VM before restoring")
             }
+            if MacControl.external(vm) {
+                guard let size = backup.record.diskGB, size >= 200 else {
+                    throw ProxmacsError("This backup has no verified macOS disk capacity; use the manual recovery procedure")
+                }
+                try await MacControl.requireStopped(vm)
+            }
             let extra = try await BackupManager.restore(vm, from: backup) { task.progress($0) }
+            if MacControl.external(vm) {
+                try MacControl.repairPermissions(vm)
+                if let size = backup.record.diskGB { try MacControl.updateDiskSize(vm, size) }
+            }
             try updateMeta(vm) { meta in
                 for file in extra where !meta.disks.contains(where: { $0.file == file }) { meta.disks.append(ExtraDisk(file: file)) }
             }

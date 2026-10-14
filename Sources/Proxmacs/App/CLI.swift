@@ -1,13 +1,25 @@
+import AppKit
 import Foundation
 
 @main
 enum Entry {
     static func main() {
         let args = Array(CommandLine.arguments.dropFirst())
+        if ExternalMonitor.enabled && args.isEmpty {
+            let settings = WebSettings.load()
+            let host = settings.bind == "0.0.0.0" ? "127.0.0.1" : settings.bind
+            if let url = URL(string: "\(settings.scheme)://\(host):\(settings.port)") { NSWorkspace.shared.open(url) }
+            exit(0)
+        }
         if args.first == "cli" {
             CLI.run(Array(args.dropFirst()))
         } else {
+            #if PROXMACS_HEADLESS
+            FileHandle.standardError.write(Data("Use cli serve to run the web dashboard.\n".utf8))
+            exit(1)
+            #else
             ProxmacsApp.main()
+            #endif
         }
     }
 }

@@ -1,5 +1,8 @@
 // swift-tools-version:6.0
 import PackageDescription
+import Foundation
+
+let headless = ProcessInfo.processInfo.environment["PROXMACS_HEADLESS"] == "1"
 
 let package = Package(
     name: "Proxmacs",
@@ -35,6 +38,8 @@ let package = Package(
                 .product(name: "HTTPTypes", package: "swift-http-types"),
             ],
             path: "Sources/Proxmacs",
+            exclude: headless ? ["UI", "App/ProxmacsApp.swift"] : [],
+            swiftSettings: headless ? [.define("PROXMACS_HEADLESS")] : [],
             // Served from disk (copied into the .app by scripts/build-app.sh), not via Bundle.module.
             linkerSettings: [.linkedFramework("NetFS")]
         ),
