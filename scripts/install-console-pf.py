@@ -122,18 +122,23 @@ def verify_network(config):
 
 
 def stop_monitor():
-    subprocess.run(['/bin/launchctl', 'bootout', 'system/' + LABEL], capture_output=True, timeout=15)
-    exists = subprocess.run(['/bin/launchctl', 'print', 'system/' + LABEL], capture_output=True, timeout=10)
-    if exists.returncode == 0:
-        raise RuntimeError('Monitor is still loaded; refusing to remove protection')
-    policy.READY.unlink(missing_ok=True)
+    result = subprocess.run(['/bin/launchctl', 'bootout', 'system/' + LABEL], capture_output=True, timeout=15)
+    # launchctl can return before the terminated job leaves the service registry.
+    for _ in range(20):
+        exists = subprocess.run(['/bin/launchctl', 'print', 'system/' + LABEL], capture_output=True, timeout=10)
+        if exists.returncode != 0:
+            policy.READY.unlink(missing_ok=True)
+            return
+        time.sleep(0.5)
+    raise RuntimeError('Monitor is still loaded; refusing to remove protection (bootout status ' + str(result.returncode) + ')')
 
 
 def rollback(config):
     no_active_vnc(config['uid'])
     # Refuse to overwrite later administrative edits.
     for key, expected in config['installed_hashes'].items():
-        if digest(key) != expected:
+        current = digest(key)
+        if current != expected and current != digest(config['backups'][key]):
             raise RuntimeError('Installed launcher changed; inspect before rollback')
     for target, saved in config['backups'].items():
         write_root(pathlib.Path(target), pathlib.Path(saved).read_bytes(), 0o755)

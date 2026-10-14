@@ -171,6 +171,28 @@ class PolicyTests(unittest.TestCase):
                 for child in processes:
                     if child.poll() is None: child.kill();child.wait()
 
+    def test_monitor_shutdown_waits_for_launchd_unregister(self):
+        with tempfile.TemporaryDirectory() as directory:
+            ready = pathlib.Path(directory) / 'ready.json';ready.touch()
+            results = [subprocess.CompletedProcess([], code, '', '') for code in [0, 0, 1]]
+            with mock.patch.object(installer.subprocess, 'run', side_effect=results) as run, mock.patch.object(installer.time, 'sleep'), mock.patch.object(installer.policy, 'READY', ready):
+                installer.stop_monitor()
+            self.assertEqual(run.call_count, 3)
+            self.assertFalse(ready.exists())
+
+    def test_partial_rollback_is_retryable_but_unrelated_edits_are_preserved(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / 'launcher'; path.write_text('original')
+            saved = pathlib.Path(directory) / 'backup'; saved.write_text('original')
+            config = {'uid': 503, 'installed_hashes': {str(path): 'new-version-hash'}, 'backups': {str(path): str(saved)}}
+            with mock.patch.object(installer, 'no_active_vnc'), mock.patch.object(installer, 'write_root'), mock.patch.object(installer, 'stop_monitor') as stop, mock.patch.object(installer.policy, 'remove_policy'), mock.patch.object(installer.policy, 'atomic_json'), mock.patch.object(installer, 'PLIST', pathlib.Path(directory) / 'job.plist'), contextlib.redirect_stdout(io.StringIO()):
+                installer.rollback(config)
+                self.assertTrue(config['rolled_back'])
+                self.assertEqual(stop.call_count, 1)
+                path.write_text('unrelated administrative edit')
+                with self.assertRaises(RuntimeError): installer.rollback(config)
+                self.assertEqual(stop.call_count, 1)
+
     def test_probe_ssh_failure_is_not_misreported_as_blocked(self):
         config = {'reader': pwd.getpwuid(os.getuid()).pw_name, 'probe_ssh': 'example'}
         with mock.patch.object(installer.subprocess, 'run', return_value=subprocess.CompletedProcess([], 255, '', 'unreachable')):
