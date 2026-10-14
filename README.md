@@ -374,7 +374,7 @@ The installer:
   If PF is disabled and completely empty, it can initialize the verified stock Apple configuration; active or
   nonstandard empty-root configurations require manual review instead of a global reload.
 - Installs `org.proxmacs.console-pf` as a root LaunchDaemon, using system Python in isolated mode. Its files,
-  root-only backups and logs live in `/Library/Application Support/ProxmacsConsolePF`.
+  Root-owned backups and logs live in `/Library/Application Support/ProxmacsConsolePF`.
 - Proves both IP families using disposable wildcard TCP listeners: loopback must work, remote listeners owned
   by the panel account must be reachable, and remote listeners owned by the VM account must be blocked.
   An SSH failure does not count as successful isolation. Only then does it update the VM launcher.
@@ -400,6 +400,14 @@ sudo /usr/bin/python3 -I scripts/install-console-pf.py --rollback
 Rollback checks for later launcher edits, restores the saved launcher/supervisor, unloads the monitor and releases
 only its own anchor and PF reference. It does not flush other rules/states or globally disable PF. Backups remain.
 The PF network tests require root and a real remote peer; unit tests below do not substitute for them.
+
+This remains an experimental Apple display server. During a real deployment on Tart 2.40.1 / macOS 27.2 beta
+(26B5091g), a raw TCP/RFB diagnostic connection coincided with a Tart SIGTRAP in Apple's
+`_VZVirtualMachineAccessor addAccessorObserver:` / `_VZVNCServer _setupVirtualMachineAccessor`.
+The guest service restarted and the browser console recovered. The exact trigger and concurrent-viewer behavior
+have not been established; do not treat this as a production stability guarantee or use raw VNC banner probes
+as a health check. The installer probes disposable TCP servers, not the running Apple VNC server.
+
 
 The browser obtains current credentials through an authenticated, non-cacheable same-origin POST, then connects
 through the panel's WebSocket endpoint. Ports and passwords are not placed in URLs. The server verifies the
